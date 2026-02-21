@@ -5,6 +5,8 @@
 <div align="center" dir="auto">
 
 ---
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1fsO82P_RV0-JSI-e1igZqbKZYYOWdtBk?usp=sharing)
 [![arXiv](https://img.shields.io/badge/arXiv-2506.23793-b31b1b.svg)](https://arxiv.org/abs/2506.23793)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/CognitiveAISystems/MAPF-GPT-DDG/blob/main/LICENSE)
 [![Hugging Face](https://img.shields.io/badge/Weights-MAPF--GPT-blue?logo=huggingface)](https://huggingface.co/aandreychuk/MAPF-GPT/tree/main)
@@ -96,11 +98,12 @@ torchrun --standalone --nproc_per_node=1 train.py gpt/config-2M-DDG.py
 ## Citation:
 
 ```bibtex
-@article{andreychuk2025advancing,
+@inproceedings{andreychuk2025advancing,
   title={Advancing Learnable Multi-Agent Pathfinding Solvers with Active Fine-Tuning},
-  author={Anton Andreychuk and Konstantin Yakovlev and Aleksandr Panov and Alexey Skrynnik},
-  journal={arXiv preprint arXiv:2506.23793},
+  author={Andreychuk, Anton and Yakovlev, Konstantin and Panov, Aleksandr and Skrynnik, Alexey},
+  booktitle={2025 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)},
+  pages={10564--10571},
   year={2025},
-  url={https://arxiv.org/abs/2506.23793}
+  organization={IEEE}
 }
 ```
