@@ -165,6 +165,8 @@ def main():
     parser.add_argument("--map_name", type=str, default="wfi_warehouse",
                         help="any map name from eval_configs/*/maps.yaml "
                              "(e.g. validation-random-seed-000, validation-mazes-seed-000, puzzle-00)")
+    parser.add_argument("--steps_delta", type=int, default=STEPS_DELTA,
+                        help="checkpoint interval for fast-LaCAM probing; lower for short episodes")
     args = parser.parse_args()
 
     ToolboxRegistry.setup_logger("INFO")
@@ -214,7 +216,7 @@ def main():
             scenario_seed=seed,
         )
         cfg = FastSolverDeltaConfig(
-            steps_delta=STEPS_DELTA,
+            steps_delta=args.steps_delta,
             steps_saved=32,
             save_debug_svg=False,
             diff_threshold=args.threshold,
