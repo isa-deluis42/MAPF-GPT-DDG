@@ -19,6 +19,8 @@ Usage:
 import argparse
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import yaml
 from pogema import AnimationConfig, AnimationMonitor, pogema_v0
