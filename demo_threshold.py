@@ -1,23 +1,31 @@
 """
-Runs fast_solver_delta on a batch of envs and prints, per env, the fast-LaCAM
-makespan curve, the consecutive diffs, the max diff, and whether that max
-crossed diff_threshold (i.e. whether the expert would be queried today).
+Warehouse-only DDG threshold demo with visual output.
 
-Requirements to actually run:
+For each scenario seed:
+  1. Render MAPF-GPT (student) trajectory as an SVG.
+  2. Run fast_solver_delta to probe makespans and compute consecutive diffs.
+  3. If max diff > threshold, also render a full expert LaCAM trajectory
+     as an SVG so you can compare visually.
+
+Requirements:
   - hf_weights/model-2M-DDG.pt  (student weights)
   - lacam built so LacamInference can load it
 
 Usage:
-  python demo_threshold.py --start_seed 0 --num_envs 8 --threshold 3
+  python demo_threshold.py --start_seed 0 --num_envs 4 --num_agents 64 --threshold 3
 """
 
 import argparse
 from pathlib import Path
 
+import yaml
+from pogema_toolbox.create_env import Environment
 from pogema_toolbox.registry import ToolboxRegistry
+from pogema_toolbox.run_episode import run_episode
 
+from create_env import create_eval_env
 from finetuning.delta_data_generator import fast_solver_delta, FastSolverDeltaConfig
-from finetuning.scenario_generators import make_pogema_maze_instance
+from finetuning.scenario_generators import make_pogema_map_instance
 from gpt.inference import MAPFGPTInference, MAPFGPTInferenceConfig
 from lacam.inference import LacamInference, LacamInferenceConfig
 
@@ -25,58 +33,41 @@ from lacam.inference import LacamInference, LacamInferenceConfig
 FAST_LACAM_TIMELIMIT = 2
 EXPERT_LACAM_TIMELIMIT = 10
 STEPS_DELTA = 16
+WAREHOUSE_MAP_PATH = Path("eval_configs/03-warehouse/maps.yaml")
 
 
-def build_batch(start_seed: int, num_envs: int, num_agents: int):
-    return [
-        make_pogema_maze_instance(
-            num_agents=num_agents,
-            max_episode_steps=256,
-            map_seed=start_seed + i,
-            scenario_seed=start_seed + i,
-        )
-        for i in range(num_envs)
-    ]
+def load_warehouse_grid() -> str:
+    with open(WAREHOUSE_MAP_PATH, "r") as f:
+        return yaml.safe_load(f)["wfi_warehouse"]
 
 
-def summarize(logs, threshold: int) -> None:
-    triggered = 0
-    for log in logs:
-        map_name = log["map_name"]
-        fast = log["fast_expert_results"]
-        steps = sorted(fast.keys())
-        makespans = [fast[s]["makespan"] for s in steps]
-        diffs = [makespans[i] - makespans[i - 1] for i in range(1, len(makespans))]
-        max_diff = max(diffs) if diffs else None
-        crossed = max_diff is not None and max_diff > threshold
-        triggered += int(crossed)
+def render(algo, env_cfg, svg_path: Path):
+    env = create_eval_env(env_cfg)
+    if hasattr(algo, "reset_states"):
+        algo.reset_states()
+    metrics = run_episode(env, algo)
+    svg_path.parent.mkdir(parents=True, exist_ok=True)
+    env.save_animation(str(svg_path))
+    return metrics
 
-        print(f"\n{map_name}")
-        print(f"  student ep_length : {log['gpt_results']['ep_length']}")
-        print(f"  checkpoint steps  : {steps}")
-        print(f"  fast makespans    : {makespans}")
-        print(f"  consecutive diffs : {diffs}")
-        print(f"  max diff          : {max_diff}")
-        print(f"  threshold ({threshold})    : {'CROSSED -> expert queried' if crossed else 'not reached'}")
-        if crossed:
-            worst_idx = diffs.index(max_diff)
-            bad_window = (steps[worst_idx], steps[worst_idx + 1])
-            print(f"  worst window      : steps {bad_window[0]} -> {bad_window[1]}")
-            print(f"  expert_results    : {log['expert_results']}")
 
-    print(f"\n{triggered}/{len(logs)} envs crossed the threshold")
+def diffs_from_log(log):
+    fast = log["fast_expert_results"]
+    steps = sorted(fast.keys())
+    makespans = [fast[s]["makespan"] for s in steps]
+    diffs = [makespans[i] - makespans[i - 1] for i in range(1, len(makespans))]
+    return steps, makespans, diffs
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--start_seed", type=int, default=0)
-    parser.add_argument("--num_envs", type=int, default=8)
-    parser.add_argument("--num_agents", type=int, default=32)
+    parser.add_argument("--num_envs", type=int, default=4)
+    parser.add_argument("--num_agents", type=int, default=64)
     parser.add_argument("--threshold", type=int, default=3)
     parser.add_argument("--weights", type=str, default="hf_weights/model-2M-DDG.pt")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--save_svg", action="store_true",
-                        help="Writes animations for crossed envs to renders/")
+    parser.add_argument("--render_dir", type=str, default="renders")
     args = parser.parse_args()
 
     ToolboxRegistry.setup_logger("INFO")
@@ -87,27 +78,79 @@ def main():
             f"Download an hf_weights/model-*.pt checkpoint first."
         )
 
-    learnable_algo = MAPFGPTInference(
+    grid = load_warehouse_grid()
+    render_dir = Path(args.render_dir)
+
+    student = MAPFGPTInference(
         MAPFGPTInferenceConfig(path_to_weights=args.weights, device=args.device)
     )
     fast_solver = LacamInference(
         LacamInferenceConfig(time_limit=FAST_LACAM_TIMELIMIT, timeouts=[FAST_LACAM_TIMELIMIT])
     )
-    expert_solver = LacamInference(
+    expert_solver_for_ddg = LacamInference(
         LacamInferenceConfig(time_limit=EXPERT_LACAM_TIMELIMIT, timeouts=[EXPERT_LACAM_TIMELIMIT])
     )
 
-    envs = build_batch(args.start_seed, args.num_envs, args.num_agents)
+    for seed in range(args.start_seed, args.start_seed + args.num_envs):
+        stem = f"warehouse-seed-{seed}-agents-{args.num_agents}"
+        print(f"\n=== {stem} ===")
 
-    cfg = FastSolverDeltaConfig(
-        steps_delta=STEPS_DELTA,
-        steps_saved=32,
-        save_debug_svg=args.save_svg,
-        diff_threshold=args.threshold,
-    )
+        env_cfg = Environment(
+            with_animation=True,
+            observation_type="MAPF",
+            on_target="nothing",
+            map=grid,
+            max_episode_steps=256,
+            num_agents=args.num_agents,
+            seed=seed,
+            obs_radius=5,
+            collision_system="soft",
+        )
 
-    _, logs = fast_solver_delta(envs, learnable_algo, fast_solver, expert_solver, cfg)
-    summarize(logs, args.threshold)
+        student_svg = render_dir / f"{stem}-student.svg"
+        student_metrics = render(student, env_cfg, student_svg)
+        print(f"  student SVG  -> {student_svg}")
+        print(f"  student ep_length={student_metrics.get('ep_length')}, "
+              f"makespan={student_metrics.get('makespan')}")
+
+        env_for_ddg = make_pogema_map_instance(
+            num_agents=args.num_agents,
+            map=grid,
+            max_episode_steps=256,
+            scenario_seed=seed,
+        )
+        cfg = FastSolverDeltaConfig(
+            steps_delta=STEPS_DELTA,
+            steps_saved=32,
+            save_debug_svg=False,
+            diff_threshold=args.threshold,
+        )
+        _, logs = fast_solver_delta(
+            [env_for_ddg], student, fast_solver, expert_solver_for_ddg, cfg
+        )
+        log = logs[0]
+        steps, makespans, diffs = diffs_from_log(log)
+        max_diff = max(diffs) if diffs else None
+        crossed = max_diff is not None and max_diff > args.threshold
+
+        print(f"  probed steps  : {steps}")
+        print(f"  fast makespans: {makespans}")
+        print(f"  diffs         : {diffs}")
+        print(f"  max diff      : {max_diff}")
+        print(f"  threshold gate: {'CROSSED' if crossed else 'not reached'}")
+
+        if crossed:
+            worst = diffs.index(max_diff)
+            print(f"  worst window  : steps {steps[worst]} -> {steps[worst + 1]}")
+            expert_render_solver = LacamInference(
+                LacamInferenceConfig(
+                    time_limit=EXPERT_LACAM_TIMELIMIT,
+                    timeouts=[EXPERT_LACAM_TIMELIMIT],
+                )
+            )
+            expert_svg = render_dir / f"{stem}-expert.svg"
+            render(expert_render_solver, env_cfg, expert_svg)
+            print(f"  expert SVG   -> {expert_svg}")
 
 
 if __name__ == "__main__":
