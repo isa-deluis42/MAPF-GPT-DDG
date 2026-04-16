@@ -123,6 +123,82 @@ def diffs_from_log(log):
     return steps, makespans, diffs
 
 
+def compute_bottleneck(env_cfg, student_actions):
+    """Replay student actions, return bottleneck agent's path + per-agent completion times."""
+    base = pogema_v0(env_cfg)
+    obs, _ = base.reset()
+    num_agents = len(obs)
+    obstacles = obs[0]["global_obstacles"]
+    goals = [tuple(o["global_target_xy"]) for o in obs]
+    positions_per_step = [[tuple(o["global_xy"]) for o in obs]]
+    completion_time = [None] * num_agents
+    for i, (pos, goal) in enumerate(zip(positions_per_step[0], goals)):
+        if pos == goal:
+            completion_time[i] = 0
+
+    for step_idx, actions in enumerate(student_actions, start=1):
+        obs, _, term, trunc, _ = base.step(actions)
+        positions = [tuple(o["global_xy"]) for o in obs]
+        positions_per_step.append(positions)
+        for i, (pos, goal) in enumerate(zip(positions, goals)):
+            if completion_time[i] is None and pos == goal:
+                completion_time[i] = step_idx
+        if all(term) or all(trunc):
+            break
+
+    ep_length = len(positions_per_step) - 1
+    for i in range(num_agents):
+        if completion_time[i] is None:
+            completion_time[i] = ep_length
+    bottleneck_idx = max(range(num_agents), key=lambda i: completion_time[i])
+    bottleneck_path = [positions_per_step[t][bottleneck_idx] for t in range(len(positions_per_step))]
+
+    return {
+        "obstacles": obstacles,
+        "bottleneck_idx": bottleneck_idx,
+        "bottleneck_path": bottleneck_path,
+        "bottleneck_start": positions_per_step[0][bottleneck_idx],
+        "bottleneck_goal": goals[bottleneck_idx],
+        "completion_time": completion_time,
+    }
+
+
+def plot_bottleneck_path(info, png_path: Path, title: str):
+    obstacles = info["obstacles"]
+    path = info["bottleneck_path"]
+    start = info["bottleneck_start"]
+    goal = info["bottleneck_goal"]
+    idx = info["bottleneck_idx"]
+    completion = info["completion_time"][idx]
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.imshow(obstacles, cmap="Greys", origin="upper", interpolation="nearest")
+
+    rows = [p[0] for p in path]
+    cols = [p[1] for p in path]
+    ax.plot(cols, rows, color="#d62728", linewidth=2, alpha=0.85,
+            label=f"agent {idx} path ({completion} steps)")
+    ax.scatter([start[1]], [start[0]], marker="o", color="#d62728", s=120,
+               edgecolor="white", zorder=3, label="start")
+    ax.scatter([goal[1]], [goal[0]], marker="*", color="#2ca02c", s=220,
+               edgecolor="white", zorder=3, label="goal")
+
+    stride = max(1, len(path) // 12)
+    for t in range(0, len(path), stride):
+        ax.annotate(str(t), (path[t][1], path[t][0]),
+                    color="#1f77b4", fontsize=7, ha="center", va="center",
+                    xytext=(0, 0), textcoords="offset points")
+
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title(title)
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+    fig.tight_layout()
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(png_path, dpi=110)
+    plt.close(fig)
+
+
 def plot_makespan(steps, makespans, diffs, threshold, png_path: Path, title: str):
     fig, (ax_m, ax_d) = plt.subplots(2, 1, figsize=(9, 5), sharex=True)
     ax_m.plot(steps, makespans, marker="o", color="#1f77b4", label="fast-LaCAM makespan")
@@ -208,6 +284,16 @@ def main():
         print(f"  student SVG   -> {student_svg}")
         print(f"  student ep_length={student_metrics.get('ep_length')}, "
               f"makespan={student_metrics.get('makespan')}")
+
+        bn = compute_bottleneck(env_cfg, student_actions)
+        bottleneck_png = render_dir / f"{stem}-bottleneck.png"
+        plot_bottleneck_path(
+            bn, bottleneck_png,
+            title=f"{stem}  bottleneck: agent {bn['bottleneck_idx']} "
+                  f"(completion={bn['completion_time'][bn['bottleneck_idx']]})",
+        )
+        print(f"  bottleneck PNG-> {bottleneck_png}  "
+              f"(agent {bn['bottleneck_idx']}, {bn['completion_time'][bn['bottleneck_idx']]} steps)")
 
         env_for_ddg = make_pogema_map_instance(
             num_agents=args.num_agents,
