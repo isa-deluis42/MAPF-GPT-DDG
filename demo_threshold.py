@@ -38,26 +38,21 @@ from utils.wrappers import UnrollWrapper
 FAST_LACAM_TIMELIMIT = 2
 EXPERT_LACAM_TIMELIMIT = 10
 STEPS_DELTA = 16
-WAREHOUSE_MAP_PATH = Path("eval_configs/03-warehouse/maps.yaml")
-
-MINI_WAREHOUSE = "\n".join([
-    "!!!!!!!!!!!!!!!!!!!!!!!!!",
-    "!@@!$$$$$$$$!$$$$$$$$!@@!",
-    "!@@!########!########!@@!",
-    "!@@!$$$$$$$$!$$$$$$$$!@@!",
-    "!!!!!!!!!!!!!!!!!!!!!!!!!",
-    "!@@!$$$$$$$$!$$$$$$$$!@@!",
-    "!@@!########!########!@@!",
-    "!@@!$$$$$$$$!$$$$$$$$!@@!",
-    "!!!!!!!!!!!!!!!!!!!!!!!!!",
-])
+EVAL_CONFIGS_DIR = Path("eval_configs")
 
 
-def load_warehouse_grid(variant: str) -> str:
-    if variant == "mini":
-        return MINI_WAREHOUSE
-    with open(WAREHOUSE_MAP_PATH, "r") as f:
-        return yaml.safe_load(f)["wfi_warehouse"]
+def load_map(map_name: str) -> str:
+    """Search every eval_configs/*/maps.yaml for the given map name."""
+    for maps_file in EVAL_CONFIGS_DIR.rglob("maps.yaml"):
+        with open(maps_file, "r") as f:
+            maps = yaml.safe_load(f) or {}
+        if map_name in maps:
+            return maps[map_name]
+    raise KeyError(
+        f"Map '{map_name}' not found under {EVAL_CONFIGS_DIR}/. "
+        f"Try e.g. wfi_warehouse, validation-random-seed-000, "
+        f"validation-mazes-seed-000, or puzzle-00."
+    )
 
 
 def build_env_stack(env_cfg, unroll_actions=None, unroll_steps=0):
@@ -167,8 +162,9 @@ def main():
     parser.add_argument("--render_dir", type=str, default="renders")
     parser.add_argument("--window_context", type=int, default=8,
                         help="extra steps before and after the bad window in the clip")
-    parser.add_argument("--map_variant", type=str, choices=["full", "mini"], default="full",
-                        help="'full' = real wfi_warehouse (46x33); 'mini' = compact 25x9 variant")
+    parser.add_argument("--map_name", type=str, default="wfi_warehouse",
+                        help="any map name from eval_configs/*/maps.yaml "
+                             "(e.g. validation-random-seed-000, validation-mazes-seed-000, puzzle-00)")
     args = parser.parse_args()
 
     ToolboxRegistry.setup_logger("INFO")
@@ -176,7 +172,7 @@ def main():
     if not Path(args.weights).exists():
         raise FileNotFoundError(f"Student weights not found at {args.weights}.")
 
-    grid = load_warehouse_grid(args.map_variant)
+    grid = load_map(args.map_name)
     render_dir = Path(args.render_dir)
 
     student = MAPFGPTInference(
@@ -190,7 +186,7 @@ def main():
     )
 
     for seed in range(args.start_seed, args.start_seed + args.num_envs):
-        stem = f"warehouse-{args.map_variant}-seed-{seed}-agents-{args.num_agents}"
+        stem = f"{args.map_name}-seed-{seed}-agents-{args.num_agents}"
         print(f"\n=== {stem} ===")
 
         env_cfg = Environment(
