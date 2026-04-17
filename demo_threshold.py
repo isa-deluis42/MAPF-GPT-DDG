@@ -17,12 +17,15 @@ Usage:
 """
 
 import argparse
+from collections import deque
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import yaml
+from matplotlib.colors import ListedColormap
 from pogema import AnimationConfig, AnimationMonitor, pogema_v0
 from pogema.wrappers.metrics import RuntimeMetricWrapper
 from pogema_toolbox.create_env import Environment
@@ -123,8 +126,8 @@ def diffs_from_log(log):
     return steps, makespans, diffs
 
 
-def compute_bottleneck(env_cfg, student_actions):
-    """Replay student actions, return bottleneck agent's path + per-agent completion times."""
+def replay_trajectories(env_cfg, student_actions):
+    """Replay student actions, return obstacles, goals, per-step positions, completion times."""
     base = pogema_v0(env_cfg)
     obs, _ = base.reset()
     num_agents = len(obs)
@@ -150,20 +153,164 @@ def compute_bottleneck(env_cfg, student_actions):
     for i in range(num_agents):
         if completion_time[i] is None:
             completion_time[i] = ep_length
-    bottleneck_idx = max(range(num_agents), key=lambda i: completion_time[i])
-    bottleneck_path = [positions_per_step[t][bottleneck_idx] for t in range(len(positions_per_step))]
 
     return {
         "obstacles": obstacles,
-        "bottleneck_idx": bottleneck_idx,
-        "bottleneck_path": bottleneck_path,
-        "bottleneck_start": positions_per_step[0][bottleneck_idx],
-        "bottleneck_goal": goals[bottleneck_idx],
+        "goals": goals,
+        "positions_per_step": positions_per_step,
         "completion_time": completion_time,
+        "num_agents": num_agents,
+        "ep_length": ep_length,
     }
 
 
-def plot_bottleneck_path(info, png_path: Path, title: str):
+def compute_bottleneck(traj):
+    """Extract bottleneck agent's path from a replay trajectory."""
+    idx = max(range(traj["num_agents"]), key=lambda i: traj["completion_time"][i])
+    path = [traj["positions_per_step"][t][idx] for t in range(len(traj["positions_per_step"]))]
+    return {
+        "obstacles": traj["obstacles"],
+        "bottleneck_idx": idx,
+        "bottleneck_path": path,
+        "bottleneck_start": traj["positions_per_step"][0][idx],
+        "bottleneck_goal": traj["goals"][idx],
+        "completion_time": traj["completion_time"],
+    }
+
+
+def bfs_distance_map(obstacles, goal):
+    """Shortest-path distance from `goal` to every free cell. Unreachable cells = -1."""
+    H, W = obstacles.shape
+    dist = np.full((H, W), -1, dtype=int)
+    gr, gc = int(goal[0]), int(goal[1])
+    if not (0 <= gr < H and 0 <= gc < W) or obstacles[gr, gc]:
+        return dist
+    dist[gr, gc] = 0
+    q = deque([(gr, gc)])
+    while q:
+        r, c = q.popleft()
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < H and 0 <= nc < W and not obstacles[nr, nc] and dist[nr, nc] == -1:
+                dist[nr, nc] = dist[r, c] + 1
+                q.append((nr, nc))
+    return dist
+
+
+def compute_fleet_stats(traj):
+    """
+    Classify each (agent, step) as advance/wait/detour/at-goal and
+    return a per-step count of stalled agents.
+    """
+    positions_per_step = traj["positions_per_step"]
+    goals = traj["goals"]
+    obstacles = traj["obstacles"]
+    num_agents = traj["num_agents"]
+
+    dist_maps = [bfs_distance_map(obstacles, g) for g in goals]
+
+    # 0 = at goal, 1 = advance (dist to goal decreased)
+    # 2 = wait (same cell), 3 = detour (moved but dist didn't decrease)
+    T = len(positions_per_step)
+    state_matrix = np.zeros((num_agents, T), dtype=int)
+    for i in range(num_agents):
+        state_matrix[i, 0] = 0 if positions_per_step[0][i] == goals[i] else 1
+
+    stall_per_step = [0]
+    for t in range(1, T):
+        stalls = 0
+        for i in range(num_agents):
+            pos = positions_per_step[t][i]
+            prev = positions_per_step[t - 1][i]
+            if pos == goals[i]:
+                state_matrix[i, t] = 0
+                continue
+            if pos == prev:
+                state_matrix[i, t] = 2
+                stalls += 1
+                continue
+            dm = dist_maps[i]
+            d_now = dm[pos[0], pos[1]] if dm[pos[0], pos[1]] >= 0 else 10**6
+            d_prev = dm[prev[0], prev[1]] if dm[prev[0], prev[1]] >= 0 else 10**6
+            if d_now < d_prev:
+                state_matrix[i, t] = 1
+            else:
+                state_matrix[i, t] = 3
+                stalls += 1
+        stall_per_step.append(stalls)
+
+    return {"state_matrix": state_matrix, "stall_per_step": stall_per_step}
+
+
+def plot_fleet_stall_timeline(stall_per_step, num_agents, png_path: Path, title: str):
+    fig, ax = plt.subplots(figsize=(9, 3))
+    steps = list(range(len(stall_per_step)))
+    ax.fill_between(steps, 0, stall_per_step, color="#d62728", alpha=0.4)
+    ax.plot(steps, stall_per_step, color="#d62728", linewidth=1.5)
+    ax.set_xlabel("step")
+    ax.set_ylabel("# agents stalled")
+    ax.set_ylim(0, num_agents)
+    ax.grid(True, alpha=0.3)
+    ax.set_title(title)
+    fig.tight_layout()
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(png_path, dpi=110)
+    plt.close(fig)
+
+
+def plot_gantt(state_matrix, completion_time, png_path: Path, title: str):
+    order = sorted(range(len(completion_time)), key=lambda i: completion_time[i])
+    sorted_matrix = state_matrix[order]
+
+    # 0 at-goal (green), 1 advance (blue), 2 wait (gray), 3 detour (orange)
+    cmap = ListedColormap(["#2ca02c", "#a7c8ff", "#9e9e9e", "#ff9933"])
+
+    fig_h = max(3, len(order) * 0.15)
+    fig, ax = plt.subplots(figsize=(12, fig_h))
+    im = ax.imshow(sorted_matrix, aspect="auto", cmap=cmap,
+                   vmin=-0.5, vmax=3.5, interpolation="nearest")
+    ax.set_xlabel("step")
+    ax.set_ylabel("agent (sorted by completion time)")
+    label_stride = max(1, len(order) // 30)
+    ax.set_yticks(range(0, len(order), label_stride))
+    ax.set_yticklabels([str(order[i]) for i in range(0, len(order), label_stride)], fontsize=7)
+    cbar = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3], fraction=0.04)
+    cbar.ax.set_yticklabels(["at goal", "advance", "wait", "detour"])
+    ax.set_title(title)
+    fig.tight_layout()
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(png_path, dpi=110)
+    plt.close(fig)
+
+
+def compute_expert_path(env_cfg, target_agent_idx, time_limit=EXPERT_LACAM_TIMELIMIT):
+    """Run LaCAM from step 0; return (positions, completion_time) for target agent."""
+    solver = LacamInference(LacamInferenceConfig(time_limit=time_limit, timeouts=[time_limit]))
+    base = pogema_v0(env_cfg)
+    obs, _ = base.reset()
+    target_goal = tuple(obs[target_agent_idx]["global_target_xy"])
+    positions = [tuple(obs[target_agent_idx]["global_xy"])]
+    completion = None
+    if positions[0] == target_goal:
+        completion = 0
+
+    while True:
+        actions = solver.act(obs)
+        if not solver.solved:
+            return None, None
+        obs, _, term, trunc, _ = base.step(actions)
+        pos = tuple(obs[target_agent_idx]["global_xy"])
+        positions.append(pos)
+        if completion is None and pos == target_goal:
+            completion = len(positions) - 1
+        if all(term) or all(trunc):
+            break
+    if completion is None:
+        completion = len(positions) - 1
+    return positions, completion
+
+
+def plot_bottleneck_path(info, png_path: Path, title: str, expert_path=None, expert_completion=None):
     obstacles = info["obstacles"]
     path = info["bottleneck_path"]
     start = info["bottleneck_start"]
@@ -177,7 +324,14 @@ def plot_bottleneck_path(info, png_path: Path, title: str):
     rows = [p[0] for p in path]
     cols = [p[1] for p in path]
     ax.plot(cols, rows, color="#d62728", linewidth=2, alpha=0.85,
-            label=f"agent {idx} path ({completion} steps)")
+            label=f"student agent {idx} ({completion} steps)")
+
+    if expert_path is not None:
+        erows = [p[0] for p in expert_path]
+        ecols = [p[1] for p in expert_path]
+        ax.plot(ecols, erows, color="#2ca02c", linewidth=2, alpha=0.85, linestyle="--",
+                label=f"expert agent {idx} ({expert_completion} steps)")
+
     ax.scatter([start[1]], [start[0]], marker="o", color="#d62728", s=120,
                edgecolor="white", zorder=3, label="start")
     ax.scatter([goal[1]], [goal[0]], marker="*", color="#2ca02c", s=220,
@@ -285,15 +439,39 @@ def main():
         print(f"  student ep_length={student_metrics.get('ep_length')}, "
               f"makespan={student_metrics.get('makespan')}")
 
-        bn = compute_bottleneck(env_cfg, student_actions)
+        traj = replay_trajectories(env_cfg, student_actions)
+        bn = compute_bottleneck(traj)
+        fleet = compute_fleet_stats(traj)
+
+        stall_png = render_dir / f"{stem}-fleet-stall.png"
+        plot_fleet_stall_timeline(
+            fleet["stall_per_step"], traj["num_agents"], stall_png,
+            title=f"{stem}  fleet stall timeline",
+        )
+        print(f"  stall PNG     -> {stall_png}  "
+              f"(peak {max(fleet['stall_per_step'])}/{traj['num_agents']} agents stalled)")
+
+        gantt_png = render_dir / f"{stem}-gantt.png"
+        plot_gantt(fleet["state_matrix"], traj["completion_time"], gantt_png,
+                   title=f"{stem}  agent state Gantt")
+        print(f"  Gantt PNG     -> {gantt_png}")
+
+        expert_path, expert_completion = compute_expert_path(env_cfg, bn["bottleneck_idx"])
+        if expert_path is None:
+            print(f"  note: LaCAM failed to solve full episode; skipping expert overlay")
         bottleneck_png = render_dir / f"{stem}-bottleneck.png"
         plot_bottleneck_path(
             bn, bottleneck_png,
-            title=f"{stem}  bottleneck: agent {bn['bottleneck_idx']} "
-                  f"(completion={bn['completion_time'][bn['bottleneck_idx']]})",
+            title=(f"{stem}  agent {bn['bottleneck_idx']}  "
+                   f"student={bn['completion_time'][bn['bottleneck_idx']]}"
+                   + (f"  expert={expert_completion}" if expert_completion is not None else "")),
+            expert_path=expert_path,
+            expert_completion=expert_completion,
         )
         print(f"  bottleneck PNG-> {bottleneck_png}  "
-              f"(agent {bn['bottleneck_idx']}, {bn['completion_time'][bn['bottleneck_idx']]} steps)")
+              f"(student {bn['completion_time'][bn['bottleneck_idx']]}"
+              + (f", expert {expert_completion}" if expert_completion is not None else "")
+              + " steps)")
 
         env_for_ddg = make_pogema_map_instance(
             num_agents=args.num_agents,
