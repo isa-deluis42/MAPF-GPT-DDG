@@ -28,6 +28,7 @@ class FastSolverDeltaConfig(BaseModel):
     steps_saved: int = 32
     save_debug_svg: bool = False
     diff_threshold = 3
+    low_diff_threshold = 1
 
 
 def run_solver(env, unroll_steps, time_limit):
@@ -128,6 +129,17 @@ def fast_solver_delta(envs, learnable_algo, fast_solver, solver, cfg: FastSolver
 
     max_diff_indices = {map_name: diffs.index(max(diffs)) for map_name, diffs in diffs_by_map.items()}
 
+    diff_buckets = {}
+    for map_name, diffs in diffs_by_map.items():
+        max_diff = max(diffs) if diffs else 0
+        if max_diff > cfg.diff_threshold:
+            bucket = 'auto_expert'
+        elif max_diff >= cfg.low_diff_threshold:
+            bucket = 'human_midrange'
+        else:
+            bucket = 'skip'
+        diff_buckets[map_name] = {'max_diff': max_diff, 'bucket': bucket}
+
     envs_with_positive_diffs = []
     for env in envs:
         if diffs_by_map[env.grid.config.map_name][max_diff_indices[env.grid.config.map_name]] > cfg.diff_threshold:
@@ -154,9 +166,11 @@ def fast_solver_delta(envs, learnable_algo, fast_solver, solver, cfg: FastSolver
         for env, unroll_steps in envs_with_positive_diffs:
             create_svg(env, unroll_steps)
     logs = [{'map_name': envs[i].grid.config.map_name,
-             'gpt_results': gpt_results[i], 
-             'fast_expert_results': fast_solver_results_by_map[envs[i].grid.config.map_name], 
-             'expert_results': expert_logs[envs[i].grid.config.map_name] if envs[i].grid.config.map_name in expert_logs else "Diff threshold not reached"} for i in range(len(envs))]
+             'gpt_results': gpt_results[i],
+             'fast_expert_results': fast_solver_results_by_map[envs[i].grid.config.map_name],
+             'expert_results': expert_logs[envs[i].grid.config.map_name] if envs[i].grid.config.map_name in expert_logs else "Diff threshold not reached",
+             'max_diff': diff_buckets[envs[i].grid.config.map_name]['max_diff'],
+             'bucket': diff_buckets[envs[i].grid.config.map_name]['bucket']} for i in range(len(envs))]
     return {'inputs': inputs, 'gt_actions': gt_actions}, logs
 
 
