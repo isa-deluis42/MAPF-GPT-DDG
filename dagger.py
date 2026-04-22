@@ -5,12 +5,12 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import glob
 
-def run_dagger(dagger_type, num_workers, device_id, seed, file_size, run_infinite=False):
+def run_dagger(dagger_type, num_workers, device_id, seed, file_size, size_min=17, size_max=21, run_infinite=False):
     def run_worker(worker_id):
         if 'warehouse' in dagger_type:
             subprocess.run(f"python worker.py --worker_id {worker_id} --device_id {device_id} --map_seed {0} --scenario_seed {seed + worker_id * 1000} --dataset_path {path_to_dataset} --dagger_type {dagger_type} --path_to_weights {path_to_weights} --num_agents {','.join(map(str, [32, 64, 96, 128, 160, 192]))} --file_size {file_size}", shell=True)
         else:
-            subprocess.run(f"python worker.py --worker_id {worker_id} --device_id {device_id} --map_seed {seed + worker_id * 1000} --scenario_seed {0} --dataset_path {path_to_dataset} --dagger_type {dagger_type} --path_to_weights {path_to_weights} --file_size {file_size}", shell=True)
+            subprocess.run(f"python worker.py --worker_id {worker_id} --device_id {device_id} --map_seed {seed + worker_id * 1000} --scenario_seed {0} --dataset_path {path_to_dataset} --dagger_type {dagger_type} --path_to_weights {path_to_weights} --file_size {file_size} --size_min {size_min} --size_max {size_max}", shell=True)
     
     path_to_weights = f"out/ckpt_{dagger_type}.pt"
     path_to_dataset = f"dataset/{dagger_type}"
@@ -34,9 +34,11 @@ def main():
     parser.add_argument('--device_id', type=int, default=0, help='Device ID (default: %(default)d)')
     parser.add_argument('--seed', type=int, default=0, help='Seed (default: %(default)d)')
     parser.add_argument('--file_size', type=int, default=50 * 2 ** 11, help='File size (default: %(default)d)')
+    parser.add_argument('--size_min', type=int, default=17, help='Minimum map size (default: %(default)d)')
+    parser.add_argument('--size_max', type=int, default=21, help='Maximum map size (default: %(default)d)')
     parser.add_argument('--run_infinite', action='store_true', help='Run infinite (default: %(default)d)')
     args = parser.parse_args()
-    run_dagger(args.dagger_type, args.num_workers, args.device_id, args.seed, args.file_size, run_infinite=args.run_infinite)
+    run_dagger(args.dagger_type, args.num_workers, args.device_id, args.seed, args.file_size, size_min=args.size_min, size_max=args.size_max, run_infinite=args.run_infinite)
 
 if __name__ == '__main__':
     main()

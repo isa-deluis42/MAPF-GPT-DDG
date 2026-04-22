@@ -1,5 +1,6 @@
 import argparse
 import json
+from functools import partial
 from pogema_toolbox.registry import ToolboxRegistry
 
 import os
@@ -88,23 +89,27 @@ def main():
     parser.add_argument('--path_to_weights', type=str, default='out/ckpt.pt', help='Path to the weights (default: %(default)s)')
     parser.add_argument('--dataset_path', type=str, default='dataset/dagger', help='Folder to save the dataset (default: %(default)s)')
     parser.add_argument('--file_size', type=int, default=50 * 2 ** 11, help='File size (default: %(default)d)')
+    parser.add_argument('--size_min', type=int, default=17, help='Minimum map size (default: %(default)d)')
+    parser.add_argument('--size_max', type=int, default=21, help='Maximum map size (default: %(default)d)')
     args = parser.parse_args()
     all_logs = []
     num_agents = list(map(int, args.num_agents.split(',')))
     if args.dagger_type == 'ddg' or args.dagger_type == 'dagger':
         seeds = [(args.map_seed + i, args.scenario_seed) for i in range(args.seeds)]
-        maze_inputs, maze_gt_actions, logs = collect_data(seeds=seeds, 
-                                                    env_generator=make_pogema_maze_instance, 
-                                                    worker_id=args.worker_id, 
+        maze_gen = partial(make_pogema_maze_instance, size_min=args.size_min, size_max=args.size_max)
+        random_gen = partial(make_pogema_random_instance, size_min=args.size_min, size_max=args.size_max)
+        maze_inputs, maze_gt_actions, logs = collect_data(seeds=seeds,
+                                                    env_generator=maze_gen,
+                                                    worker_id=args.worker_id,
                                                     device_id=args.device_id,
-                                                    actions_required=args.file_size // 5 - args.file_size // 50, 
+                                                    actions_required=args.file_size // 5 - args.file_size // 50,
                                                     dagger_type=args.dagger_type,
                                                     on_target="nothing",
                                                     path_to_weights=args.path_to_weights,
                                                     num_agents=num_agents)
         all_logs.extend(logs)
-        random_inputs, random_gt_actions, logs = collect_data(seeds=seeds, 
-                                                        env_generator=make_pogema_random_instance, 
+        random_inputs, random_gt_actions, logs = collect_data(seeds=seeds,
+                                                        env_generator=random_gen,
                                                         worker_id=args.worker_id, 
                                                         device_id=args.device_id,
                                                         actions_required=args.file_size // 50, 

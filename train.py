@@ -82,6 +82,8 @@ num_workers = 8
 device_id = 0
 file_size = 50 * 2 ** 11
 max_ratio = 0.25
+size_min = 17
+size_max = 21
 
 train_data_files = ["dataset/train", f"dataset/{dagger_type}"]
 valid_data_file = "dataset/validation"
@@ -370,7 +372,7 @@ while True:
                 logger.info(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, f"ckpt_{dagger_type}_{iter_num}.pt"))
                 if dagger_type != 'standard':
-                    run_dagger(dagger_type, num_workers, device_id, seed*num_workers, file_size)
+                    run_dagger(dagger_type, num_workers, device_id, seed*num_workers, file_size, size_min=size_min, size_max=size_max)
                     seed += 1000
 
     if iter_num % eval_interval == 0:
