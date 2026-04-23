@@ -241,7 +241,9 @@ def save_congestion_dataset(
     with open(output_path.parent / 'episode_info.json', 'w') as f:
         json.dump(data['episode_info'], f, indent=2)
     
-    pa.ipc.new_file(table, str(output_path)).write()
+    with pa.OSFile(str(output_path), "wb") as sink:
+        with pa.ipc.new_file(sink, table.schema) as writer:
+            writer.write_table(table)
     ToolboxRegistry.debug(f"Saved congestion dataset to {output_path}")
 
 
