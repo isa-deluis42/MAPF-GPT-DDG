@@ -5,16 +5,19 @@ class MAPFGPTObservationWrapper(Wrapper):
     def __init__(self, env, observation_generator):
         super().__init__(env)
         self.observation_generator = observation_generator
-        
+        self.last_raw_observations = None
+
 
     def reset(self):
         observations, infos = self.env.reset()
+        self.last_raw_observations = observations
         self.observation_generator.create_agents([o["global_xy"] for o in observations], [o["global_target_xy"] for o in observations])
         return self.observation_generator.generate_observations(), infos
-    
+
     def step(self, actions):
         desired_actions = actions.copy()
         observations, rewards, terminated, truncated, infos = self.env.step(actions)
+        self.last_raw_observations = observations
         self.observation_generator.update_agents([o["global_xy"] for o in observations], [o["global_target_xy"] for o in observations], desired_actions)
         observations = self.observation_generator.generate_observations()
         return observations, rewards, terminated, truncated, infos

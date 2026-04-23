@@ -12,7 +12,7 @@ This is Phase 1 of the congestion classification pipeline:
 
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 
 import cppimport.import_hook
@@ -88,7 +88,8 @@ def collect_congestion_data(
     learnable_algo,
     fast_solver,
     expert_solver,
-    cfg: CongestionDataCollectorConfig
+    cfg: CongestionDataCollectorConfig,
+    episodes_output_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Collect congestion data from multiple environments.
@@ -113,10 +114,17 @@ def collect_congestion_data(
     all_confidence_buckets = []
     episode_info = []
     
+    if episodes_output_dir is not None:
+        episodes_output_dir = Path(episodes_output_dir)
+        episodes_output_dir.mkdir(parents=True, exist_ok=True)
+
     for env_idx, env in enumerate(envs):
         env = RuntimeMetricWrapper(deepcopy(env))
         obs, _ = env.reset(seed=env.grid_config.seed)
-        
+
+        # Snapshot the static map (shared across all agents in this episode).
+        obstacles_grid = np.asarray(obs[0]["global_obstacles"], dtype=np.int8).copy()
+
         # Create observation generator
         obs_generator = ObservationGenerator(
             obs[0]["global_obstacles"].copy().astype(int).tolist(),
@@ -159,24 +167,40 @@ def collect_congestion_data(
         
         learnable_algo.reset_states()
         obs, _ = wrapped_env.reset()
-        
+
         num_agents = wrapped_env.grid.config.num_agents
         episode_inputs = []
-        
+
+        # Record ground-truth positions/goals at every step for replay.
+        raw_obs0 = wrapped_env.last_raw_observations
+        positions_per_step: List[np.ndarray] = [
+            np.asarray([o["global_xy"] for o in raw_obs0], dtype=np.int16)
+        ]
+        goals_per_step: List[np.ndarray] = [
+            np.asarray([o["global_target_xy"] for o in raw_obs0], dtype=np.int16)
+        ]
+
         for step in range(wrapped_env.grid.config.max_episode_steps):
             # Generate raw inputs at this timestep
             raw_inputs = obs_generator.generate_observations()
             # raw_inputs: (num_agents, 256)
-            
+
             # Get actions
             actions = learnable_algo.act(obs)
-            
+
             # Store inputs for all agents
             for agent_idx in range(len(raw_inputs)):
                 episode_inputs.append(raw_inputs[agent_idx])
-            
+
             # Step environment
             obs, rew, terminated, truncated, infos = wrapped_env.step(actions)
+            raw_obs = wrapped_env.last_raw_observations
+            positions_per_step.append(
+                np.asarray([o["global_xy"] for o in raw_obs], dtype=np.int16)
+            )
+            goals_per_step.append(
+                np.asarray([o["global_target_xy"] for o in raw_obs], dtype=np.int16)
+            )
             if all(terminated) or all(truncated):
                 break
         
@@ -194,7 +218,10 @@ def collect_congestion_data(
         all_diffs.extend(episode_diffs)
         all_confidence_buckets.extend(episode_buckets)
 
-        episode_info.append({
+        positions_arr = np.stack(positions_per_step)  # (T+1, N, 2)
+        goals_arr = np.stack(goals_per_step)          # (T+1, N, 2)
+
+        episode_record = {
             'env_idx': env_idx,
             'map_name': env.grid.config.map_name,
             'makespan_fast': makespan_fast,
@@ -203,8 +230,20 @@ def collect_congestion_data(
             'label': label,
             'confidence_bucket': confidence_bucket,
             'num_timesteps': num_timesteps,
-            'num_agents': num_agents
-        })
+            'num_agents': num_agents,
+        }
+
+        if episodes_output_dir is not None:
+            episode_file = episodes_output_dir / f"ep_{env_idx:04d}.npz"
+            np.savez_compressed(
+                episode_file,
+                obstacles=obstacles_grid,
+                positions=positions_arr,
+                goals=goals_arr,
+            )
+            episode_record['episode_file'] = episode_file.name
+
+        episode_info.append(episode_record)
     
     return {
         'inputs': np.array(all_inputs, dtype=np.int8),
@@ -306,12 +345,16 @@ def main():
         save_raw_inputs=True
     )
     
+    arrow_path = Path('dataset/congestion/train.arrow')
+    episodes_dir = arrow_path.parent / 'episodes'
+
     data = collect_congestion_data(
         envs=envs,
         learnable_algo=learnable_algo,
         fast_solver=fast_solver,
         expert_solver=expert_solver,
-        cfg=cfg
+        cfg=cfg,
+        episodes_output_dir=episodes_dir,
     )
     
     # Print statistics
@@ -326,7 +369,7 @@ def main():
         print(f"  {info['map_name']}: diff={info['diff']}, label={info['label']}")
     
     # Save dataset
-    save_congestion_dataset(data, 'dataset/congestion/train.arrow')
+    save_congestion_dataset(data, str(arrow_path))
 
 
 if __name__ == '__main__':
