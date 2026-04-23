@@ -128,13 +128,13 @@ def collect_congestion_data(
         )
         
         # Step 1: Run with fast solver to get makespan_fast
-        fast_env = deepcopy(env)
+        fast_env = UnrollWrapper(deepcopy(env))
         fast_env.set_unroll_steps(256)
         fast_results = run_episode(fast_env, fast_solver)
         makespan_fast = fast_results.get('makespan', 256)
         
         # Step 2: Run with expert solver to get makespan_expert
-        expert_env = deepcopy(env)
+        expert_env = UnrollWrapper(deepcopy(env))
         expert_env.set_unroll_steps(256)
         expert_results = run_episode(expert_env, expert_solver)
         makespan_expert = expert_results.get('makespan', 256)
