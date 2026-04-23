@@ -236,7 +236,8 @@ def evaluate_human(
             
             inputs = inputs.to(device)
             human_labels = human_labels.to(device)
-            
+            auto_labels = auto_labels.to(device)
+
             logits, _ = model(inputs)
             preds = logits.argmax(dim=1)
             
