@@ -25,13 +25,15 @@ from pogema.wrappers.metrics import RuntimeMetricWrapper
 from macro_env import PogemaMacroEnvironment, MAPFGPTObservationWrapper
 from gpt.observation_generator import ObservationGenerator, InputParameters
 from utils.wrappers import UnrollWrapper
+from finetuning.congestion_utils import bucket_to_label, diff_to_confidence_bucket
 
 
 class CongestionDataCollectorConfig(BaseModel):
     """Configuration for congestion data collection."""
     fast_solver_time_limit: int = 2      # Time limit for fast solver
     expert_solver_time_limit: int = 10   # Time limit for expert solver
-    diff_threshold: int = 3              # Threshold for failure label
+    diff_threshold: int = 3              # High-confidence positive threshold
+    low_diff_threshold: int = 1          # High-confidence negative threshold
     save_raw_inputs: bool = True         # Whether to save raw 256-dim inputs
     save_debug_svg: bool = False          # Save SVG visualizations
 
@@ -105,6 +107,9 @@ def collect_congestion_data(
     """
     all_inputs = []
     all_labels = []
+    all_episode_ids = []
+    all_diffs = []
+    all_confidence_buckets = []
     episode_info = []
     
     for env_idx, env in enumerate(envs):
@@ -135,11 +140,16 @@ def collect_congestion_data(
         
         # Step 3: Compute label based on diff
         diff = makespan_expert - makespan_fast
-        label = 1 if diff > cfg.diff_threshold else 0
+        confidence_bucket = diff_to_confidence_bucket(
+            diff=diff,
+            low_diff_threshold=cfg.low_diff_threshold,
+            high_diff_threshold=cfg.diff_threshold,
+        )
+        label = bucket_to_label(confidence_bucket)
         
         ToolboxRegistry.debug(
             f"Env {env_idx}: fast={makespan_fast}, expert={makespan_expert}, "
-            f"diff={diff}, label={label}"
+            f"diff={diff}, label={label}, bucket={confidence_bucket}"
         )
         
         # Step 4: Run with learnable algo to collect raw inputs
@@ -172,11 +182,17 @@ def collect_congestion_data(
         # Step 5: Assign label to all timesteps in this episode
         num_timesteps = len(episode_inputs) // num_agents if num_agents > 0 else 0
         episode_labels = [label] * len(episode_inputs)
-        
+        episode_ids = [env_idx] * len(episode_inputs)
+        episode_diffs = [diff] * len(episode_inputs)
+        episode_buckets = [confidence_bucket] * len(episode_inputs)
+
         # Store data
         all_inputs.extend(episode_inputs)
         all_labels.extend(episode_labels)
-        
+        all_episode_ids.extend(episode_ids)
+        all_diffs.extend(episode_diffs)
+        all_confidence_buckets.extend(episode_buckets)
+
         episode_info.append({
             'env_idx': env_idx,
             'map_name': env.grid.config.map_name,
@@ -184,6 +200,7 @@ def collect_congestion_data(
             'makespan_expert': makespan_expert,
             'diff': diff,
             'label': label,
+            'confidence_bucket': confidence_bucket,
             'num_timesteps': num_timesteps,
             'num_agents': num_agents
         })
@@ -191,6 +208,9 @@ def collect_congestion_data(
     return {
         'inputs': np.array(all_inputs, dtype=np.int8),
         'labels': np.array(all_labels, dtype=np.int8),
+        'episode_ids': np.array(all_episode_ids, dtype=np.int32),
+        'diffs': np.array(all_diffs, dtype=np.int16),
+        'confidence_buckets': np.array(all_confidence_buckets, dtype=object),
         'episode_info': episode_info
     }
 
@@ -210,6 +230,9 @@ def save_congestion_dataset(
     table = pa.table({
         'inputs': pa.array(data['inputs'].tolist()),
         'labels': pa.array(data['labels'].tolist()),
+        'episode_ids': pa.array(data['episode_ids'].tolist()),
+        'diffs': pa.array(data['diffs'].tolist()),
+        'confidence_buckets': pa.array(data['confidence_buckets'].tolist()),
     })
     
     # Also save episode info as JSON

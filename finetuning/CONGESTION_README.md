@@ -43,7 +43,7 @@ save_congestion_dataset(data, 'dataset/congestion/train.arrow')
 "
 ```
 
-### Step 2: Train Classifier
+### Step 2: Train Classifier on Confident Buckets
 
 ```bash
 python finetuning/train_congestion_classifier.py \
@@ -53,29 +53,31 @@ python finetuning/train_congestion_classifier.py \
     --batch_size 256
 ```
 
-**Expected output:**
-- ~6,844 fail samples (label=1)
-- ~X pass samples (label=0) depending on your data
-- F1 score on validation set
+By default, Phase 1 trains only on:
+- `diff < 1` -> confident negative
+- `diff > 3` -> confident positive
+
+Samples with `1 <= diff <= 3` are marked `uncertain` and excluded from
+supervised pretraining.
 
 ---
 
 ## Phase 2: Human Feedback + Contrastive
 
-### Step 1: Generate Label Template
+### Step 1: Export High-Value Review Samples
 
 ```bash
-python finetuning/generate_human_labels.py \
-    --input dataset/congestion/train.arrow \
-    --output dataset/congestion/human_labels.json \
-    --num_samples 100 \
-    --strategy balanced
+python finetuning/export_active_learning_samples.py \
+    --data dataset/congestion/train.arrow \
+    --model out/congestion_classifier.pt \
+    --output dataset/congestion/review_samples.json \
+    --num_samples 100
 ```
 
 ### Step 2: Edit Human Labels
 
-Open `dataset/congestion/human_labels.json` and:
-1. Review samples where auto-label might be wrong
+Open `dataset/congestion/review_samples.json` and:
+1. Review samples where the model is likely wrong or uncertain
 2. Change `human_label` field (0 = pass, 1 = fail)
 3. Add optional notes
 
@@ -85,7 +87,7 @@ Open `dataset/congestion/human_labels.json` and:
 python finetuning/contrastive_finetune.py \
     --base_model out/congestion_classifier.pt \
     --data dataset/congestion/train.arrow \
-    --human_labels dataset/congestion/human_labels.json \
+    --human_labels dataset/congestion/review_samples.json \
     --output out/congestion_classifier_refined.pt \
     --epochs 5
 ```
@@ -98,7 +100,8 @@ python finetuning/contrastive_finetune.py \
 |------|---------|
 | `finetuning/congestion_data_collector.py` | Collect raw inputs + auto-labels |
 | `finetuning/train_congestion_classifier.py` | Phase 1 training |
-| `finetuning/generate_human_labels.py` | Create label template |
+| `finetuning/generate_human_labels.py` | Sample a manual review template directly from the dataset |
+| `finetuning/export_active_learning_samples.py` | Export disagreement and uncertain cases for human review |
 | `finetuning/contrastive_finetune.py` | Phase 2 fine-tuning |
 
 ---
@@ -143,12 +146,13 @@ python finetuning/train_congestion_classifier.py \
 ## Key Concepts
 
 ### Label Definition
-- **Label = 1 (fail)**: `expert_makespan - fast_makespan > 3`
-- **Label = 0 (pass)**: diff ≤ 3
+- **Confident positive**: `expert_makespan - fast_makespan > 3`
+- **Confident negative**: `expert_makespan - fast_makespan < 1`
+- **Uncertain**: `1 <= diff <= 3`
 
 ### Why This Works
-1. **Auto-labels are cheap**: 6,844 failures from solver diff
-2. **Human labels are valuable**: Only label uncertain cases
+1. **Auto-labels are cheap**: Clear solver-gap cases provide weak supervision
+2. **Human labels are valuable**: Review the cases the model is uncertain about or disagrees with
 3. **Contrastive learns patterns**: Not just threshold, but "failure patterns"
 
 ### Input to Classifier

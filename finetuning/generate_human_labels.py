@@ -8,19 +8,12 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
-from typing import List, Dict, Any
 
 import numpy as np
-import pyarrow as pa
 from tqdm import tqdm
-
-
-def compute_input_hash(input_array: np.ndarray) -> str:
-    """Compute SHA256 hash of input array."""
-    return hashlib.sha256(input_array.tobytes()).hexdigest()
+from finetuning.congestion_utils import compute_input_hash, load_congestion_arrow
 
 
 def main():
@@ -38,21 +31,28 @@ def main():
     
     # Load dataset
     print(f"Loading dataset from {args.input}...")
-    with pa.memory_map(args.input, 'r') as source:
-        table = pa.ipc.open_file(source).read_all()
-        inputs = np.stack(table['inputs'].to_numpy())
-        labels = table['labels'].to_numpy()
+    data = load_congestion_arrow(args.input)
+    inputs = data["inputs"]
+    labels = data["auto_labels"]
+    confidence_buckets = data["confidence_buckets"]
+    diffs = data["diffs"]
     
     print(f"Loaded {len(labels)} samples")
-    print(f"  Label distribution: {np.bincount(labels)}")
+    unique_labels, label_counts = np.unique(labels, return_counts=True)
+    print(f"  Label distribution: {dict(zip(unique_labels.tolist(), label_counts.tolist()))}")
     
     # Select samples for human labeling
     if args.strategy == 'random':
-        indices = np.random.choice(len(labels), args.num_samples, replace=False)
+        indices = np.random.choice(len(labels), min(args.num_samples, len(labels)), replace=False)
     elif args.strategy == 'uncertain':
-        # Focus on samples near decision boundary (middle of array)
-        # This is a placeholder - in practice you'd use model confidence
-        indices = np.random.choice(len(labels), args.num_samples, replace=False)
+        uncertain_indices = np.where(confidence_buckets == "uncertain")[0]
+        if len(uncertain_indices) == 0:
+            raise ValueError("No uncertain samples found in dataset.")
+        indices = np.random.choice(
+            uncertain_indices,
+            min(args.num_samples, len(uncertain_indices)),
+            replace=False,
+        )
     elif args.strategy == 'balanced':
         # Sample equal from each class
         pos_indices = np.where(labels == 1)[0]
@@ -70,6 +70,9 @@ def main():
             "input_hash": input_hash,
             "input": inputs[idx].tolist(),
             "human_label": int(labels[idx]),  # Start with auto label as default
+            "auto_label": int(labels[idx]),
+            "confidence_bucket": str(confidence_buckets[idx]),
+            "diff": int(diffs[idx]),
             "notes": ""
         })
     

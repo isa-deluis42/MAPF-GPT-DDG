@@ -24,12 +24,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
-import pyarrow as pa
+from finetuning.congestion_utils import (
+    CongestionClassifierWithEmbedding,
+    IndexedCongestionDataset,
+    load_congestion_arrow,
+)
 
 
 # ============================================================================
@@ -118,102 +122,28 @@ class CombinedLoss(nn.Module):
 # Dataset with Human Labels
 # ============================================================================
 
-class HumanLabeledDataset(Dataset):
-    """
-    Dataset with human-provided labels.
-    
-    Expected format for human_labels.json:
-    [
-        {
-            "input_hash": "sha256...",
-            "input": [256-dim array],
-            "human_label": 0 or 1,
-            "notes": "optional notes"
-        },
-        ...
-    ]
-    """
-    
+class HumanLabeledDataset(IndexedCongestionDataset):
     def __init__(self, data_path: str, human_labels_path: str):
         self.data_path = Path(data_path)
         self.human_labels_path = Path(human_labels_path)
         self._load_data()
     
     def _load_data(self):
-        """Load base data and human labels."""
-        # Load base data
-        with pa.memory_map(self.data_path, 'r') as source:
-            table = pa.ipc.open_file(source).read_all()
-            self.inputs = np.stack(table['inputs'].to_numpy())
-            self.labels = table['labels'].to_numpy()
-        
-        # Load human labels
+        data = load_congestion_arrow(str(self.data_path))
+
         with open(self.human_labels_path, 'r') as f:
             human_data = json.load(f)
-        
-        # Create mapping from input hash to human label
-        self.human_label_map = {}
-        for item in human_data:
-            # Use hash of input as key
-            input_hash = hash(tuple(item['input']))
-            self.human_label_map[input_hash] = item['human_label']
-        
-        # Find indices where we have human labels
-        self.human_indices = []
-        for idx in range(len(self.inputs)):
-            input_hash = hash(tuple(self.inputs[idx]))
-            if input_hash in self.human_label_map:
-                self.human_indices.append(idx)
-        
-        print(f"Loaded {len(self.labels)} base samples")
-        print(f"Found {len(self.human_indices)} human-labeled samples")
-    
-    def __len__(self):
-        return len(self.human_indices)
-    
-    def __getitem__(self, idx):
-        real_idx = self.human_indices[idx]
-        input_vec = self.inputs[real_idx]
-        auto_label = self.labels[real_idx]
-        
-        # Override with human label if available
-        input_hash = hash(tuple(input_vec))
-        human_label = self.human_label_map.get(input_hash, auto_label)
-        
-        return (
-            torch.tensor(input_vec, dtype=torch.float32),
-            torch.tensor(human_label, dtype=torch.long),
-            torch.tensor(auto_label, dtype=torch.long)  # Keep for comparison
-        )
+        human_label_map = {
+            item["input_hash"]: int(item["human_label"])
+            for item in human_data
+            if "input_hash" in item
+        }
+        matched_indices = np.where(np.isin(data["input_hashes"], list(human_label_map.keys())))[0]
 
+        super().__init__(data, matched_indices, human_label_map)
 
-# ============================================================================
-# Model (same architecture, but with embedding output)
-# ============================================================================
-
-class CongestionClassifierWithEmbedding(nn.Module):
-    """
-    Classifier that outputs both logits and embeddings.
-    """
-    
-    def __init__(self, input_dim: int = 256, hidden_dim: int = 512):
-        super().__init__()
-        
-        self.backbone = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(0.1),
-        )
-        
-        self.head = nn.Linear(hidden_dim, 2)
-    
-    def forward(self, x):
-        embedding = self.backbone(x)
-        logits = self.head(embedding)
-        return logits, embedding
+        print(f"Loaded {len(data['auto_labels'])} base samples")
+        print(f"Found {len(self.indices)} human-labeled samples")
 
 
 # ============================================================================
@@ -249,11 +179,7 @@ def train_contrastive(
     
     for batch in tqdm(dataloader, desc="Training"):
         # Handle 2 or 3 tensors (with or without auto labels)
-        if len(batch) == 3:
-            inputs, human_labels, auto_labels = batch
-        else:
-            inputs, human_labels = batch
-            auto_labels = human_labels
+        inputs, human_labels, auto_labels, _ = batch
         
         inputs = inputs.to(device)
         human_labels = human_labels.to(device)
@@ -306,11 +232,7 @@ def evaluate_human(
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
-            if len(batch) == 3:
-                inputs, human_labels, auto_labels = batch
-            else:
-                inputs, human_labels = batch
-                auto_labels = human_labels
+            inputs, human_labels, auto_labels, _ = batch
             
             inputs = inputs.to(device)
             human_labels = human_labels.to(device)
@@ -387,7 +309,10 @@ def main():
     
     # Load base model
     model = CongestionClassifierWithEmbedding().to(args.device)
-    model.load_state_dict(torch.load(args.base_model))
+    checkpoint = torch.load(args.base_model, map_location=args.device)
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        checkpoint = checkpoint["state_dict"]
+    model.load_state_dict(checkpoint)
     print(f"\nLoaded base model from {args.base_model}")
     
     # Optimizer (lower LR for fine-tuning)
