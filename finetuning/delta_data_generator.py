@@ -18,6 +18,7 @@ from utils.svg_utils import cut_history, create_multi_animation
 from utils.wrappers import UnrollWrapper
 
 from multiprocessing import Pool
+import cppimport.import_hook
 from lacam.inference import LacamInference, LacamInferenceConfig
 from pogema.wrappers.metrics import RuntimeMetricWrapper
 from macro_env import PogemaMacroEnvironment, MAPFGPTObservationWrapper

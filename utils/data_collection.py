@@ -1,4 +1,5 @@
 # noinspection PyUnresolvedReferences
+import cppimport.import_hook
 from gpt.observation_generator import ObservationGenerator, InputParameters
 from pogema_toolbox.registry import ToolboxRegistry
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Tuple
 import numpy as np
 
+import cppimport.import_hook
 from pogema import AnimationMonitor, AnimationConfig
 from pogema_toolbox.run_episode import run_episode
 from pogema_toolbox.registry import ToolboxRegistry
