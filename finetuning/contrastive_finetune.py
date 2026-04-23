@@ -291,7 +291,7 @@ def main():
     # Compute class distribution
     labels_list = []
     for idx in range(len(dataset)):
-        _, hl, _ = dataset[idx]
+        _, hl, _, _ = dataset[idx]
         labels_list.append(hl.item())
     labels_array = np.array(labels_list)
     unique, counts = np.unique(labels_array, return_counts=True)
