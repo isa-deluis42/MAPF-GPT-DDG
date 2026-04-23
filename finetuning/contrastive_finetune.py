@@ -312,6 +312,20 @@ def main():
     checkpoint = torch.load(args.base_model, map_location=args.device)
     if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
         checkpoint = checkpoint["state_dict"]
+
+    # Remap keys from CongestionClassifier (model.0/3/6) to
+    # CongestionClassifierWithEmbedding (backbone.0/3, head).
+    if any(k.startswith("model.") for k in checkpoint):
+        remapped = {}
+        for k, v in checkpoint.items():
+            if k.startswith("model.6."):
+                remapped[k.replace("model.6.", "head.")] = v
+            elif k.startswith("model."):
+                remapped[k.replace("model.", "backbone.")] = v
+            else:
+                remapped[k] = v
+        checkpoint = remapped
+
     model.load_state_dict(checkpoint)
     print(f"\nLoaded base model from {args.base_model}")
     
