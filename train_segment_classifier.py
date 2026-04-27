@@ -290,6 +290,8 @@ def main():
     model = Segment3DCNN().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    train_losses, val_top3s = [], []
+
     best_top3 = 0.0
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -302,8 +304,12 @@ def main():
             optimizer.step()
             total_loss += loss.item()
 
+        avg_loss = total_loss / len(train_loader)
         top3 = evaluate_top3(model, episode_paths, VAL_MAP_SEEDS, device)
-        print(f"Epoch {epoch:3d} | loss {total_loss / len(train_loader):.4f} | val top-3 acc {top3:.3f}")
+        train_losses.append(avg_loss)
+        val_top3s.append(top3)
+
+        print(f"Epoch {epoch:3d} | loss {avg_loss:.4f} | val top-3 acc {top3:.3f}")
 
         if top3 > best_top3:
             best_top3 = top3
@@ -313,6 +319,21 @@ def main():
             print(f"  → saved (best top-3: {best_top3:.3f})")
 
     print(f"Training complete. Best val top-3 acc: {best_top3:.3f}")
+
+    import matplotlib.pyplot as plt
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+    epochs = range(1, args.epochs + 1)
+    ax1.plot(epochs, train_losses)
+    ax1.set_ylabel("Train Loss")
+    ax1.grid(True)
+    ax2.plot(epochs, val_top3s, color="orange")
+    ax2.set_ylabel("Val Top-3 Acc")
+    ax2.set_xlabel("Epoch")
+    ax2.grid(True)
+    fig.tight_layout()
+    plot_path = Path(args.output).with_suffix(".png")
+    fig.savefig(plot_path, dpi=150)
+    print(f"Loss curve saved to {plot_path}")
 
 
 if __name__ == "__main__":
