@@ -6,7 +6,7 @@ These seeds are never used in DDG training:
 - scenario_seeds are never 0 (DDG always uses scenario_seed=0)
 """
 
-MAP_SEEDS = list(range(900000, 900020))       # 20 procedural maps
+MAP_SEEDS = list(range(128, 148))             # 20 procedural maps — above benchmark eval (0-127), below DDG training (8000+)
 SCENARIO_SEEDS = [1000, 1001, 1002]           # 3 agent placements per map
 AGENT_COUNTS = [16, 32, 48]                   # 3 density levels
 MAP_TYPES = ["maze", "random"]
