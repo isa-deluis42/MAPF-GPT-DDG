@@ -13,9 +13,10 @@ Usage:
 """
 
 import argparse
+import json
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -29,6 +30,52 @@ from held_out_seed_set import (
 # Diff thresholds (matching DDG's FastSolverDeltaConfig)
 DIFF_CONFIDENT_POS = 3
 DIFF_CONFIDENT_NEG = 1
+
+
+# ---------------------------------------------------------------------------
+# Annotations
+# ---------------------------------------------------------------------------
+
+def load_annotations(path) -> Dict[str, Tuple[int, int]]:
+    """Read annotations.json → {scenario_id: (worst_idx, clean_idx)}.
+    Drops entries with missing indices or worst==clean."""
+    with open(path) as f:
+        raw = json.load(f)
+    out: Dict[str, Tuple[int, int]] = {}
+    for sid, entry in raw.items():
+        wi = entry.get("worst_congestion_failure_segment_index")
+        ci = entry.get("clearly_clean_segment_index")
+        if wi is None or ci is None or int(wi) == int(ci):
+            continue
+        out[sid] = (int(wi), int(ci))
+    return out
+
+
+def split_annotations(
+    annotations: Dict[str, Tuple[int, int]], hold_out_every: int = 4
+) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Tuple[int, int]]]:
+    """Deterministic split: every `hold_out_every`-th annotation (sorted by id)
+    becomes val; the rest become train."""
+    train, val = {}, {}
+    for i, sid in enumerate(sorted(annotations)):
+        (val if i % hold_out_every == 0 else train)[sid] = annotations[sid]
+    return train, val
+
+
+def is_annotated_npz(path: Path) -> bool:
+    """True iff `path` lives in filtered_npzs/annotated/ — where the actual
+    annotated rollouts were moved during the labeling pass.
+    These are the only files that the human verdict applies to (other ckpt_*/
+    files with the same scenario_id are *different rollouts* of the same scenario)."""
+    return "annotated" in path.parts
+
+
+def annotation_path_for(scenario_id: str, episode_paths: List[Path]) -> Optional[Path]:
+    """Find the filtered_npzs/annotated/<scenario_id>.npz the human verdict applies to."""
+    for p in episode_paths:
+        if p.stem == scenario_id and is_annotated_npz(p):
+            return p
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +212,20 @@ def generate_pairs(segment_diffs: np.ndarray, context_segments: int = 1) -> List
 # ---------------------------------------------------------------------------
 
 class SegmentPairDataset(Dataset):
-    def __init__(self, episode_paths: List[Path], map_seed_filter: set, augment: bool = False, context_segments: int = 1):
+    def __init__(
+        self,
+        episode_paths: List[Path],
+        map_seed_filter: set,
+        augment: bool = False,
+        context_segments: int = 1,
+        human_overrides: Optional[Dict[str, Tuple[int, int]]] = None,
+    ):
         self.episodes = []
         self.pairs: List[Tuple[int, int, int, float]] = []  # (ep_idx, seg_i, seg_j, weight)
         self.augment = augment
         self.context_segments = context_segments
+        human_overrides = human_overrides or {}
+        self.n_overridden = 0  # episodes whose pair list got replaced by a human pair
 
         for path in sorted(episode_paths):
             data = np.load(str(path), allow_pickle=True)
@@ -182,6 +238,18 @@ class SegmentPairDataset(Dataset):
                 "goals": data["goals"],
                 "segment_diffs": data["segment_diffs"],
             })
+
+            # Option B: if this is an annotated rollout with a human verdict,
+            # replace all auto-generated pairs from this episode with the single human pair.
+            sid = path.stem
+            if is_annotated_npz(path) and sid in human_overrides:
+                wi, ci = human_overrides[sid]
+                S = len(data["segment_diffs"]) - (context_segments - 1)
+                if 0 <= wi < S and 0 <= ci < S:
+                    self.pairs.append((ep_idx, wi, ci, 1.0))
+                    self.n_overridden += 1
+                continue  # skip auto pairs for this episode
+
             for i, j, w in generate_pairs(data["segment_diffs"], context_segments):
                 self.pairs.append((ep_idx, i, j, w))
 
@@ -239,6 +307,34 @@ class Segment3DCNN(nn.Module):
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
+def evaluate_human_pairs(
+    model: "Segment3DCNN",
+    episode_paths: List[Path],
+    annotations: Dict[str, Tuple[int, int]],
+    device: str,
+    context_segments: int = 1,
+) -> Tuple[float, int]:
+    """Pairwise accuracy: fraction of (worst, clean) pairs where score(worst) > score(clean)."""
+    model.eval()
+    correct = total = 0
+    for sid, (wi, ci) in annotations.items():
+        path = annotation_path_for(sid, episode_paths)
+        if path is None:
+            continue
+        data = np.load(str(path), allow_pickle=True)
+        S = len(data["segment_diffs"]) - (context_segments - 1)
+        if not (0 <= wi < S and 0 <= ci < S):
+            continue
+        feat_w = featurize_segment(data["obstacles"], data["positions"], data["goals"], wi, context_segments=context_segments)
+        feat_c = featurize_segment(data["obstacles"], data["positions"], data["goals"], ci, context_segments=context_segments)
+        x = torch.from_numpy(np.stack([feat_w, feat_c])).to(device)
+        scores = model(x).cpu().numpy()
+        correct += int(scores[0] > scores[1])
+        total += 1
+    return (correct / total if total > 0 else 0.0), total
+
+
+@torch.no_grad()
 def evaluate_top3(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> float:
     """
     For each val episode, check if argmax(segment_diffs) is in the CNN's top-3 scored segments.
@@ -286,25 +382,54 @@ def main():
                         help="Number of 16-step segments in the temporal window (1=this segment only, 2=this+next)")
     parser.add_argument("--base_ch", type=int, default=16,
                         help="CNN base channel width; must be divisible by 4 (default: 16)")
+    parser.add_argument("--annotations", type=str, default=None,
+                        help="Path to annotations.json. If set, enables Option-B human-label override "
+                             "during training and reports human-pair accuracy each epoch.")
+    parser.add_argument("--hold_out_every", type=int, default=4,
+                        help="Every Nth annotation (sorted by scenario_id) is held out from training. "
+                             "Default 4 → ~7/28 held out for val human-pair accuracy.")
     args = parser.parse_args()
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
 
     episode_paths = list(Path(args.data).rglob("*.npz"))
-    print(f"Found {len(episode_paths)} episode files")
+    n_annotated = sum(1 for p in episode_paths if is_annotated_npz(p))
+    print(f"Found {len(episode_paths)} episode files ({n_annotated} under filtered_npzs/annotated/)")
 
-    train_dataset = SegmentPairDataset(episode_paths, TRAIN_MAP_SEEDS, augment=True, context_segments=args.context_segments)
-    val_dataset = SegmentPairDataset(episode_paths, VAL_MAP_SEEDS, augment=False, context_segments=args.context_segments)
+    # Load annotations for Stage-1 measurement and (optionally) Stage-2 training overrides.
+    all_annotations: Dict[str, Tuple[int, int]] = {}
+    train_annotations: Dict[str, Tuple[int, int]] = {}
+    val_annotations: Dict[str, Tuple[int, int]] = {}
+    if args.annotations:
+        all_annotations = load_annotations(args.annotations)
+        train_annotations, val_annotations = split_annotations(all_annotations, args.hold_out_every)
+        print(f"Annotations: {len(all_annotations)} total → {len(train_annotations)} train + {len(val_annotations)} val "
+              f"(hold_out_every={args.hold_out_every})")
+
+    train_overrides = train_annotations if args.annotations else None
+    train_dataset = SegmentPairDataset(
+        episode_paths, TRAIN_MAP_SEEDS,
+        augment=True, context_segments=args.context_segments, human_overrides=train_overrides,
+    )
+    val_dataset = SegmentPairDataset(
+        episode_paths, VAL_MAP_SEEDS,
+        augment=False, context_segments=args.context_segments, human_overrides=None,
+    )
     print(f"Train pairs: {len(train_dataset)}  |  Val pairs: {len(val_dataset)}")
+    if args.annotations:
+        print(f"  ↳ {train_dataset.n_overridden} train episodes had auto pairs replaced by human pair")
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     model = Segment3DCNN(base_ch=args.base_ch).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
-    train_losses, val_top3s = [], []
+    # When annotations are provided, save by held-out human-pair accuracy; otherwise by top-3.
+    save_by = "human_val" if args.annotations else "top3"
 
-    best_top3 = 0.0
+    train_losses, val_top3s, hpair_alls, hpair_trains, hpair_vals = [], [], [], [], []
+    best_metric = 0.0
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
@@ -321,27 +446,47 @@ def main():
         train_losses.append(avg_loss)
         val_top3s.append(top3)
 
-        print(f"Epoch {epoch:3d} | loss {avg_loss:.4f} | val top-3 acc {top3:.3f}")
+        msg = f"Epoch {epoch:3d} | loss {avg_loss:.4f} | val top-3 acc {top3:.3f}"
 
-        if top3 > best_top3:
-            best_top3 = top3
+        if all_annotations:
+            hp_all, n_all = evaluate_human_pairs(model, episode_paths, all_annotations, device, args.context_segments)
+            hp_train, n_train = evaluate_human_pairs(model, episode_paths, train_annotations, device, args.context_segments)
+            hp_val, n_val = evaluate_human_pairs(model, episode_paths, val_annotations, device, args.context_segments)
+            hpair_alls.append(hp_all); hpair_trains.append(hp_train); hpair_vals.append(hp_val)
+            msg += (f" | human-pair acc all {hp_all:.3f} ({n_all}) "
+                    f"train {hp_train:.3f} ({n_train}) val {hp_val:.3f} ({n_val})")
+
+        print(msg)
+
+        metric = (hpair_vals[-1] if save_by == "human_val" and hpair_vals else top3)
+        if metric > best_metric:
+            best_metric = metric
             out_path = Path(args.output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"state_dict": model.state_dict(), "base_ch": args.base_ch, "in_channels": 4, "context_segments": args.context_segments}, str(out_path))
-            print(f"  → saved (best top-3: {best_top3:.3f})")
+            torch.save({
+                "state_dict": model.state_dict(),
+                "base_ch": args.base_ch,
+                "in_channels": 4,
+                "context_segments": args.context_segments,
+                "save_by": save_by,
+                "best_metric": best_metric,
+            }, str(out_path))
+            print(f"  → saved (best {save_by}: {best_metric:.3f})")
 
-    print(f"Training complete. Best val top-3 acc: {best_top3:.3f}")
+    print(f"Training complete. Best {save_by}: {best_metric:.3f}")
 
     import matplotlib.pyplot as plt
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+    n_panels = 3 if all_annotations else 2
+    fig, axes = plt.subplots(n_panels, 1, figsize=(8, 3 * n_panels), sharex=True)
     epochs = range(1, args.epochs + 1)
-    ax1.plot(epochs, train_losses)
-    ax1.set_ylabel("Train Loss")
-    ax1.grid(True)
-    ax2.plot(epochs, val_top3s, color="orange")
-    ax2.set_ylabel("Val Top-3 Acc")
-    ax2.set_xlabel("Epoch")
-    ax2.grid(True)
+    axes[0].plot(epochs, train_losses); axes[0].set_ylabel("Train Loss"); axes[0].grid(True)
+    axes[1].plot(epochs, val_top3s, color="orange"); axes[1].set_ylabel("Val Top-3 Acc"); axes[1].grid(True)
+    if all_annotations:
+        axes[2].plot(epochs, hpair_alls, label=f"all ({n_all})")
+        axes[2].plot(epochs, hpair_trains, label=f"train ({n_train})")
+        axes[2].plot(epochs, hpair_vals, label=f"val ({n_val})")
+        axes[2].set_ylabel("Human-Pair Acc"); axes[2].grid(True); axes[2].legend(loc="lower right")
+    axes[-1].set_xlabel("Epoch")
     fig.tight_layout()
     plot_path = Path(args.output).with_suffix(".png")
     fig.savefig(plot_path, dpi=150)
