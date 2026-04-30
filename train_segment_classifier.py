@@ -284,6 +284,8 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--context_segments", type=int, default=1, choices=[1, 2],
                         help="Number of 16-step segments in the temporal window (1=this segment only, 2=this+next)")
+    parser.add_argument("--base_ch", type=int, default=16,
+                        help="CNN base channel width; must be divisible by 4 (default: 16)")
     args = parser.parse_args()
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
@@ -297,7 +299,7 @@ def main():
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
-    model = Segment3DCNN().to(device)
+    model = Segment3DCNN(base_ch=args.base_ch).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     train_losses, val_top3s = [], []
@@ -325,7 +327,7 @@ def main():
             best_top3 = top3
             out_path = Path(args.output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"state_dict": model.state_dict(), "base_ch": 16, "in_channels": 4, "context_segments": args.context_segments}, str(out_path))
+            torch.save({"state_dict": model.state_dict(), "base_ch": args.base_ch, "in_channels": 4, "context_segments": args.context_segments}, str(out_path))
             print(f"  → saved (best top-3: {best_top3:.3f})")
 
     print(f"Training complete. Best val top-3 acc: {best_top3:.3f}")
