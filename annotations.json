@@ -1,3 +1,213 @@
 {
-
+  "maze_ms128_ss1001_na16": {
+    "scenario_id": "maze_ms128_ss1001_na16",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms128_ss1001_na16.npz",
+    "num_steps": 48,
+    "num_segments": 3,
+    "segment_diffs": [
+      9,
+      3,
+      -47
+    ],
+    "worst_congestion_failure_segment_index": 0,
+    "clearly_clean_segment_index": 1,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms128_ss1001_na32": {
+    "scenario_id": "maze_ms128_ss1001_na32",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms128_ss1001_na32.npz",
+    "num_steps": 51,
+    "num_segments": 3,
+    "segment_diffs": [
+      6,
+      -2,
+      2
+    ],
+    "worst_congestion_failure_segment_index": 1,
+    "clearly_clean_segment_index": 1,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms128_ss1002_na32": {
+    "scenario_id": "maze_ms128_ss1002_na32",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms128_ss1002_na32.npz",
+    "num_steps": 48,
+    "num_segments": 3,
+    "segment_diffs": [
+      2,
+      3,
+      -48
+    ],
+    "worst_congestion_failure_segment_index": 0,
+    "clearly_clean_segment_index": 2,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms128_ss1002_na48": {
+    "scenario_id": "maze_ms128_ss1002_na48",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms128_ss1002_na48.npz",
+    "num_steps": 66,
+    "num_segments": 4,
+    "segment_diffs": [
+      1,
+      9,
+      1,
+      7
+    ],
+    "worst_congestion_failure_segment_index": null,
+    "clearly_clean_segment_index": null,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms129_ss1001_na48": {
+    "scenario_id": "maze_ms129_ss1001_na48",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms129_ss1001_na48.npz",
+    "num_steps": 74,
+    "num_segments": 4,
+    "segment_diffs": [
+      4,
+      19,
+      3,
+      0
+    ],
+    "worst_congestion_failure_segment_index": 1,
+    "clearly_clean_segment_index": 3,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms129_ss1002_na48": {
+    "scenario_id": "maze_ms129_ss1002_na48",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms129_ss1002_na48.npz",
+    "num_steps": 48,
+    "num_segments": 3,
+    "segment_diffs": [
+      1,
+      2,
+      -51
+    ],
+    "worst_congestion_failure_segment_index": 1,
+    "clearly_clean_segment_index": 2,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms130_ss1000_na48": {
+    "scenario_id": "maze_ms130_ss1000_na48",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms130_ss1000_na48.npz",
+    "num_steps": 43,
+    "num_segments": 2,
+    "segment_diffs": [
+      -5,
+      2
+    ],
+    "worst_congestion_failure_segment_index": 0,
+    "clearly_clean_segment_index": 1,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms130_ss1001_na16": {
+    "scenario_id": "maze_ms130_ss1001_na16",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms130_ss1001_na16.npz",
+    "num_steps": 37,
+    "num_segments": 2,
+    "segment_diffs": [
+      2,
+      0
+    ],
+    "worst_congestion_failure_segment_index": 0,
+    "clearly_clean_segment_index": 1,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms130_ss1001_na32": {
+    "scenario_id": "maze_ms130_ss1001_na32",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms130_ss1001_na32.npz",
+    "num_steps": 41,
+    "num_segments": 2,
+    "segment_diffs": [
+      2,
+      2
+    ],
+    "worst_congestion_failure_segment_index": 0,
+    "clearly_clean_segment_index": 1,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms130_ss1002_na48": {
+    "scenario_id": "maze_ms130_ss1002_na48",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms130_ss1002_na48.npz",
+    "num_steps": 41,
+    "num_segments": 2,
+    "segment_diffs": [
+      4,
+      2
+    ],
+    "worst_congestion_failure_segment_index": 0,
+    "clearly_clean_segment_index": 1,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms131_ss1000_na32": {
+    "scenario_id": "maze_ms131_ss1000_na32",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms131_ss1000_na32.npz",
+    "num_steps": 55,
+    "num_segments": 3,
+    "segment_diffs": [
+      3,
+      7,
+      -2
+    ],
+    "worst_congestion_failure_segment_index": 0,
+    "clearly_clean_segment_index": 2,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  },
+  "maze_ms131_ss1000_na48": {
+    "scenario_id": "maze_ms131_ss1000_na48",
+    "npz_path": "dataset/held_out/filtered_npzs/maze_ms131_ss1000_na48.npz",
+    "num_steps": 206,
+    "num_segments": 12,
+    "segment_diffs": [
+      13,
+      15,
+      33,
+      0,
+      9,
+      19,
+      21,
+      18,
+      4,
+      20,
+      2,
+      -2
+    ],
+    "worst_congestion_failure_segment_index": 2,
+    "clearly_clean_segment_index": 11,
+    "notes": {
+      "worst_congestion_failure": "",
+      "clearly_clean_segment": ""
+    }
+  }
 }
