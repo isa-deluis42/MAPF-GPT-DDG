@@ -41,19 +41,24 @@ def featurize_segment(
     goals: np.ndarray,       # (N, 2) int16 — (x, y)
     segment_idx: int,
     history_steps: int = 4,
+    context_segments: int = 1,
 ) -> np.ndarray:
     """
-    Build a (4, STEPS_DELTA, GRID_PAD_SIZE, GRID_PAD_SIZE) float32 tensor for one segment.
+    Build a (4, STEPS_DELTA * context_segments, GRID_PAD_SIZE, GRID_PAD_SIZE) tensor.
+
+    context_segments=1 covers just this segment (16 frames).
+    context_segments=2 also includes the next segment (32 frames) as future context.
+    Frames past episode end are zero-padded.
 
     Channels:
-      0 — agent density per timestep within the segment
+      0 — agent density per timestep within the window
       1 — obstacle map (broadcast across T)
       2 — goal density (broadcast across T)
       3 — pre-segment agent history density (broadcast across T)
     """
     H, W = obstacles.shape
     seg_start = segment_idx * STEPS_DELTA
-    T = STEPS_DELTA
+    T = STEPS_DELTA * context_segments
 
     def place(grid, xy_array):
         """Add 1 at each position; global_xy is (row, col)."""
@@ -123,9 +128,12 @@ def _augment(feat_a: np.ndarray, feat_b: np.ndarray):
 # Pair generation
 # ---------------------------------------------------------------------------
 
-def generate_pairs(segment_diffs: np.ndarray) -> List[Tuple[int, int, float]]:
+def generate_pairs(segment_diffs: np.ndarray, context_segments: int = 1) -> List[Tuple[int, int, float]]:
     """
     Return (i, j, weight) pairs where segment i should score higher than j.
+
+    The last (context_segments - 1) segments are excluded from training pairs
+    because their forward context is partially zero-padded.
 
     Weights:
       confident_pos vs confident_neg  → 1.0
@@ -133,7 +141,7 @@ def generate_pairs(segment_diffs: np.ndarray) -> List[Tuple[int, int, float]]:
       both midrange                   → skipped (0.0)
     """
     pairs = []
-    S = len(segment_diffs)
+    S = len(segment_diffs) - (context_segments - 1)
     for i in range(S):
         for j in range(S):
             if i == j or segment_diffs[i] <= segment_diffs[j]:
@@ -157,10 +165,11 @@ def generate_pairs(segment_diffs: np.ndarray) -> List[Tuple[int, int, float]]:
 # ---------------------------------------------------------------------------
 
 class SegmentPairDataset(Dataset):
-    def __init__(self, episode_paths: List[Path], map_seed_filter: set, augment: bool = False):
+    def __init__(self, episode_paths: List[Path], map_seed_filter: set, augment: bool = False, context_segments: int = 1):
         self.episodes = []
         self.pairs: List[Tuple[int, int, int, float]] = []  # (ep_idx, seg_i, seg_j, weight)
         self.augment = augment
+        self.context_segments = context_segments
 
         for path in sorted(episode_paths):
             data = np.load(str(path), allow_pickle=True)
@@ -173,7 +182,7 @@ class SegmentPairDataset(Dataset):
                 "goals": data["goals"],
                 "segment_diffs": data["segment_diffs"],
             })
-            for i, j, w in generate_pairs(data["segment_diffs"]):
+            for i, j, w in generate_pairs(data["segment_diffs"], context_segments):
                 self.pairs.append((ep_idx, i, j, w))
 
     def __len__(self) -> int:
@@ -182,8 +191,8 @@ class SegmentPairDataset(Dataset):
     def __getitem__(self, idx: int):
         ep_idx, seg_i, seg_j, weight = self.pairs[idx]
         ep = self.episodes[ep_idx]
-        feat_i = featurize_segment(ep["obstacles"], ep["positions"], ep["goals"], seg_i)
-        feat_j = featurize_segment(ep["obstacles"], ep["positions"], ep["goals"], seg_j)
+        feat_i = featurize_segment(ep["obstacles"], ep["positions"], ep["goals"], seg_i, context_segments=self.context_segments)
+        feat_j = featurize_segment(ep["obstacles"], ep["positions"], ep["goals"], seg_j, context_segments=self.context_segments)
         if self.augment:
             feat_i, feat_j = _augment(feat_i, feat_j)
         return (
@@ -230,7 +239,7 @@ class Segment3DCNN(nn.Module):
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def evaluate_top3(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str) -> float:
+def evaluate_top3(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> float:
     """
     For each val episode, check if argmax(segment_diffs) is in the CNN's top-3 scored segments.
     """
@@ -248,7 +257,7 @@ def evaluate_top3(model: Segment3DCNN, episode_paths: List[Path], map_seed_filte
             continue
 
         feats = np.stack([
-            featurize_segment(data["obstacles"], data["positions"], data["goals"], s)
+            featurize_segment(data["obstacles"], data["positions"], data["goals"], s, context_segments=context_segments)
             for s in range(S)
         ])
         scores = model(torch.from_numpy(feats).to(device)).cpu().numpy()
@@ -273,6 +282,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--context_segments", type=int, default=1, choices=[1, 2],
+                        help="Number of 16-step segments in the temporal window (1=this segment only, 2=this+next)")
     args = parser.parse_args()
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
@@ -280,8 +291,8 @@ def main():
     episode_paths = list(Path(args.data).rglob("*.npz"))
     print(f"Found {len(episode_paths)} episode files")
 
-    train_dataset = SegmentPairDataset(episode_paths, TRAIN_MAP_SEEDS, augment=True)
-    val_dataset = SegmentPairDataset(episode_paths, VAL_MAP_SEEDS, augment=False)
+    train_dataset = SegmentPairDataset(episode_paths, TRAIN_MAP_SEEDS, augment=True, context_segments=args.context_segments)
+    val_dataset = SegmentPairDataset(episode_paths, VAL_MAP_SEEDS, augment=False, context_segments=args.context_segments)
     print(f"Train pairs: {len(train_dataset)}  |  Val pairs: {len(val_dataset)}")
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
@@ -304,7 +315,7 @@ def main():
             total_loss += loss.item()
 
         avg_loss = total_loss / len(train_loader)
-        top3 = evaluate_top3(model, episode_paths, VAL_MAP_SEEDS, device)
+        top3 = evaluate_top3(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
         train_losses.append(avg_loss)
         val_top3s.append(top3)
 
@@ -314,7 +325,7 @@ def main():
             best_top3 = top3
             out_path = Path(args.output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"state_dict": model.state_dict(), "base_ch": 16, "in_channels": 4}, str(out_path))
+            torch.save({"state_dict": model.state_dict(), "base_ch": 16, "in_channels": 4, "context_segments": args.context_segments}, str(out_path))
             print(f"  → saved (best top-3: {best_top3:.3f})")
 
     print(f"Training complete. Best val top-3 acc: {best_top3:.3f}")
