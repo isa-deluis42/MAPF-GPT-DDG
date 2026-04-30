@@ -335,12 +335,15 @@ def evaluate_human_pairs(
 
 
 @torch.no_grad()
-def evaluate_top3(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> float:
+def evaluate_metrics(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> Tuple[float, float]:
     """
-    For each val episode, check if argmax(segment_diffs) is in the CNN's top-3 scored segments.
+    For each val episode compute two metrics:
+      top1_pm1 — model's argmax score is within ±1 of argmax(segment_diffs) [DDG-aligned]
+      top3     — argmax(segment_diffs) is in the CNN's top-3 scored segments
+    Returns (top1_pm1, top3).
     """
     model.eval()
-    correct = total = 0
+    pm1_correct = top3_correct = total = 0
 
     for path in sorted(episode_paths):
         data = np.load(str(path), allow_pickle=True)
@@ -359,11 +362,16 @@ def evaluate_top3(model: Segment3DCNN, episode_paths: List[Path], map_seed_filte
         scores = model(torch.from_numpy(feats).to(device)).cpu().numpy()
 
         true_best = int(np.argmax(diffs))
+        pred_best = int(np.argmax(scores))
         top3 = set(np.argsort(scores)[-3:].tolist())
-        correct += int(true_best in top3)
+
+        pm1_correct += int(abs(pred_best - true_best) <= 1)
+        top3_correct += int(true_best in top3)
         total += 1
 
-    return correct / total if total > 0 else 0.0
+    if total == 0:
+        return 0.0, 0.0
+    return pm1_correct / total, top3_correct / total
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +396,8 @@ def main():
     parser.add_argument("--hold_out_every", type=int, default=4,
                         help="Every Nth annotation (sorted by scenario_id) is held out from training. "
                              "Default 4 → ~7/28 held out for val human-pair accuracy.")
+    parser.add_argument("--min_checkpoint", type=int, default=0,
+                        help="Skip episodes from MAPF-GPT checkpoint_iter < this (default: 0 = use all)")
     args = parser.parse_args()
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
@@ -395,6 +405,23 @@ def main():
     episode_paths = list(Path(args.data).rglob("*.npz"))
     n_annotated = sum(1 for p in episode_paths if is_annotated_npz(p))
     print(f"Found {len(episode_paths)} episode files ({n_annotated} under filtered_npzs/annotated/)")
+
+    # Apply min-checkpoint filter (only affects ckpt_*/ files; annotated/ and filtered_npzs/ are kept regardless).
+    if args.min_checkpoint > 0:
+        filtered = []
+        for p in episode_paths:
+            ckpt_dir = p.parent.name  # e.g. 'ckpt_500'
+            if ckpt_dir.startswith("ckpt_"):
+                try:
+                    if int(ckpt_dir[5:]) >= args.min_checkpoint:
+                        filtered.append(p)
+                except ValueError:
+                    filtered.append(p)
+            else:
+                # Keep filtered_npzs/ and annotated/ files (they don't carry a per-checkpoint tag in the path).
+                filtered.append(p)
+        episode_paths = filtered
+        print(f"Filtered to {len(episode_paths)} episodes (ckpt_*/ kept only if iter >= {args.min_checkpoint})")
 
     # Load annotations for Stage-1 measurement and (optionally) Stage-2 training overrides.
     all_annotations: Dict[str, Tuple[int, int]] = {}
@@ -424,10 +451,11 @@ def main():
     model = Segment3DCNN(base_ch=args.base_ch).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
-    # When annotations are provided, save by held-out human-pair accuracy; otherwise by top-3.
-    save_by = "human_val" if args.annotations else "top3"
+    # When annotations are provided, save by held-out human-pair accuracy; otherwise by DDG-aligned top-1±1.
+    save_by = "human_val" if args.annotations else "pm1"
 
-    train_losses, val_top3s, hpair_alls, hpair_trains, hpair_vals = [], [], [], [], []
+    train_losses, val_pm1s, val_top3s = [], [], []
+    hpair_alls, hpair_trains, hpair_vals = [], [], []
     best_metric = 0.0
 
     for epoch in range(1, args.epochs + 1):
@@ -442,11 +470,12 @@ def main():
             total_loss += loss.item()
 
         avg_loss = total_loss / len(train_loader)
-        top3 = evaluate_top3(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
+        pm1, top3 = evaluate_metrics(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
         train_losses.append(avg_loss)
+        val_pm1s.append(pm1)
         val_top3s.append(top3)
 
-        msg = f"Epoch {epoch:3d} | loss {avg_loss:.4f} | val top-3 acc {top3:.3f}"
+        msg = f"Epoch {epoch:3d} | loss {avg_loss:.4f} | top-1±1 {pm1:.3f} | top-3 {top3:.3f}"
 
         if all_annotations:
             hp_all, n_all = evaluate_human_pairs(model, episode_paths, all_annotations, device, args.context_segments)
@@ -458,7 +487,7 @@ def main():
 
         print(msg)
 
-        metric = (hpair_vals[-1] if save_by == "human_val" and hpair_vals else top3)
+        metric = (hpair_vals[-1] if save_by == "human_val" and hpair_vals else pm1)
         if metric > best_metric:
             best_metric = metric
             out_path = Path(args.output)
@@ -480,7 +509,9 @@ def main():
     fig, axes = plt.subplots(n_panels, 1, figsize=(8, 3 * n_panels), sharex=True)
     epochs = range(1, args.epochs + 1)
     axes[0].plot(epochs, train_losses); axes[0].set_ylabel("Train Loss"); axes[0].grid(True)
-    axes[1].plot(epochs, val_top3s, color="orange"); axes[1].set_ylabel("Val Top-3 Acc"); axes[1].grid(True)
+    axes[1].plot(epochs, val_pm1s, color="orange", label="top-1±1 (DDG-aligned)")
+    axes[1].plot(epochs, val_top3s, color="steelblue", linestyle="--", label="top-3")
+    axes[1].set_ylabel("Val Acc"); axes[1].grid(True); axes[1].legend(loc="lower right")
     if all_annotations:
         axes[2].plot(epochs, hpair_alls, label=f"all ({n_all})")
         axes[2].plot(epochs, hpair_trains, label=f"train ({n_train})")
