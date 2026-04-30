@@ -239,12 +239,15 @@ class Segment3DCNN(nn.Module):
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def evaluate_top3(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> float:
+def evaluate_metrics(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> Tuple[float, float]:
     """
-    For each val episode, check if argmax(segment_diffs) is in the CNN's top-3 scored segments.
+    For each val episode compute two metrics:
+      top1_pm1 — model's argmax score is within ±1 of argmax(segment_diffs) [DDG-aligned]
+      top3     — argmax(segment_diffs) is in the CNN's top-3 scored segments
+    Returns (top1_pm1, top3).
     """
     model.eval()
-    correct = total = 0
+    pm1_correct = top3_correct = total = 0
 
     for path in sorted(episode_paths):
         data = np.load(str(path), allow_pickle=True)
@@ -263,11 +266,16 @@ def evaluate_top3(model: Segment3DCNN, episode_paths: List[Path], map_seed_filte
         scores = model(torch.from_numpy(feats).to(device)).cpu().numpy()
 
         true_best = int(np.argmax(diffs))
+        pred_best = int(np.argmax(scores))
         top3 = set(np.argsort(scores)[-3:].tolist())
-        correct += int(true_best in top3)
+
+        pm1_correct += int(abs(pred_best - true_best) <= 1)
+        top3_correct += int(true_best in top3)
         total += 1
 
-    return correct / total if total > 0 else 0.0
+    if total == 0:
+        return 0.0, 0.0
+    return pm1_correct / total, top3_correct / total
 
 
 # ---------------------------------------------------------------------------
@@ -286,12 +294,23 @@ def main():
                         help="Number of 16-step segments in the temporal window (1=this segment only, 2=this+next)")
     parser.add_argument("--base_ch", type=int, default=16,
                         help="CNN base channel width; must be divisible by 4 (default: 16)")
+    parser.add_argument("--min_checkpoint", type=int, default=0,
+                        help="Skip episodes from MAPF-GPT checkpoint_iter < this (default: 0 = use all)")
     args = parser.parse_args()
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
 
     episode_paths = list(Path(args.data).rglob("*.npz"))
     print(f"Found {len(episode_paths)} episode files")
+
+    if args.min_checkpoint > 0:
+        filtered = []
+        for p in episode_paths:
+            ckpt_dir = p.parent.name  # e.g. 'ckpt_500'
+            if ckpt_dir.startswith("ckpt_") and int(ckpt_dir[5:]) >= args.min_checkpoint:
+                filtered.append(p)
+        episode_paths = filtered
+        print(f"Filtered to {len(episode_paths)} episodes (checkpoint_iter >= {args.min_checkpoint})")
 
     train_dataset = SegmentPairDataset(episode_paths, TRAIN_MAP_SEEDS, augment=True, context_segments=args.context_segments)
     val_dataset = SegmentPairDataset(episode_paths, VAL_MAP_SEEDS, augment=False, context_segments=args.context_segments)
@@ -302,9 +321,9 @@ def main():
     model = Segment3DCNN(base_ch=args.base_ch).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
-    train_losses, val_top3s = [], []
+    train_losses, val_pm1s, val_top3s = [], [], []
 
-    best_top3 = 0.0
+    best_pm1 = 0.0
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
@@ -317,20 +336,21 @@ def main():
             total_loss += loss.item()
 
         avg_loss = total_loss / len(train_loader)
-        top3 = evaluate_top3(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
+        pm1, top3 = evaluate_metrics(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
         train_losses.append(avg_loss)
+        val_pm1s.append(pm1)
         val_top3s.append(top3)
 
-        print(f"Epoch {epoch:3d} | loss {avg_loss:.4f} | val top-3 acc {top3:.3f}")
+        print(f"Epoch {epoch:3d} | loss {avg_loss:.4f} | top-1±1 {pm1:.3f} | top-3 {top3:.3f}")
 
-        if top3 > best_top3:
-            best_top3 = top3
+        if pm1 > best_pm1:
+            best_pm1 = pm1
             out_path = Path(args.output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({"state_dict": model.state_dict(), "base_ch": args.base_ch, "in_channels": 4, "context_segments": args.context_segments}, str(out_path))
-            print(f"  → saved (best top-3: {best_top3:.3f})")
+            print(f"  → saved (best top-1±1: {best_pm1:.3f})")
 
-    print(f"Training complete. Best val top-3 acc: {best_top3:.3f}")
+    print(f"Training complete. Best val top-1±1 acc: {best_pm1:.3f}")
 
     import matplotlib.pyplot as plt
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
@@ -338,9 +358,11 @@ def main():
     ax1.plot(epochs, train_losses)
     ax1.set_ylabel("Train Loss")
     ax1.grid(True)
-    ax2.plot(epochs, val_top3s, color="orange")
-    ax2.set_ylabel("Val Top-3 Acc")
+    ax2.plot(epochs, val_pm1s, color="orange", label="top-1±1 (DDG-aligned)")
+    ax2.plot(epochs, val_top3s, color="steelblue", linestyle="--", label="top-3")
+    ax2.set_ylabel("Val Acc")
     ax2.set_xlabel("Epoch")
+    ax2.legend()
     ax2.grid(True)
     fig.tight_layout()
     plot_path = Path(args.output).with_suffix(".png")
