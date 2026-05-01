@@ -319,7 +319,7 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     model = Segment3DCNN(base_ch=args.base_ch).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     train_losses, val_pm1s, val_top3s = [], [], []
 

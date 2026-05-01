@@ -81,10 +81,10 @@ def stuck_plus_no_progress(data, s):
 
 
 # ---------------------------------------------------------------------------
-# Top-3 accuracy
+# Top-1 ±1 accuracy: model's argmax pick within ±1 of argmax(segment_diffs)
 # ---------------------------------------------------------------------------
 
-def top3_acc(scorer, episode_paths, map_seed_filter):
+def pm1_acc(scorer, episode_paths, map_seed_filter, tolerance: int = 1):
     correct = total = 0
     for path in sorted(episode_paths):
         data = np.load(str(path), allow_pickle=True)
@@ -96,13 +96,13 @@ def top3_acc(scorer, episode_paths, map_seed_filter):
             continue
         scores = np.array([scorer(data, s) for s in range(S)])
         true_best = int(np.argmax(diffs))
-        top3 = set(np.argsort(scores)[-3:].tolist())
-        correct += int(true_best in top3)
+        pred_best = int(np.argmax(scores))
+        correct += int(abs(pred_best - true_best) <= tolerance)
         total += 1
     return correct / total if total > 0 else 0.0, total
 
 
-def cnn_top3_acc(model_path, episode_paths, map_seed_filter, device):
+def cnn_pm1_acc(model_path, episode_paths, map_seed_filter, device, tolerance: int = 1):
     from train_segment_classifier import Segment3DCNN, featurize_segment
     ckpt = torch.load(model_path, map_location=device)
     model = Segment3DCNN(in_channels=ckpt["in_channels"], base_ch=ckpt["base_ch"]).to(device)
@@ -126,8 +126,8 @@ def cnn_top3_acc(model_path, episode_paths, map_seed_filter, device):
             ])
             scores = model(torch.from_numpy(feats).to(device)).cpu().numpy()
             true_best = int(np.argmax(diffs))
-            top3 = set(np.argsort(scores)[-3:].tolist())
-            correct += int(true_best in top3)
+            pred_best = int(np.argmax(scores))
+            correct += int(abs(pred_best - true_best) <= tolerance)
             total += 1
     return correct / total if total > 0 else 0.0, total
 
@@ -142,6 +142,8 @@ def main():
     parser.add_argument("--cnn", default=None, help="Optional path to trained CNN checkpoint")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--tolerance", type=int, default=1,
+                        help="Pass if predicted top is within ±tolerance of true_best (default: 1)")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -158,18 +160,19 @@ def main():
     ]
 
     print(f"Val map seeds: {sorted(VAL_MAP_SEEDS)}")
+    print(f"Metric: top-1 ±{args.tolerance} (DDG-aligned)")
     print()
-    print(f"  {'Heuristic':<28} top-3 acc   (n)")
+    print(f"  {'Heuristic':<28} acc         (n)")
     print(f"  {'-'*28} ----------- -----")
 
     n_total = None
     for name, fn in heuristics:
-        acc, n = top3_acc(fn, episode_paths, VAL_MAP_SEEDS)
+        acc, n = pm1_acc(fn, episode_paths, VAL_MAP_SEEDS, tolerance=args.tolerance)
         n_total = n
         print(f"  {name:<28} {acc:.3f}       {n}")
 
     if args.cnn:
-        acc, _ = cnn_top3_acc(args.cnn, episode_paths, VAL_MAP_SEEDS, args.device)
+        acc, _ = cnn_pm1_acc(args.cnn, episode_paths, VAL_MAP_SEEDS, args.device, tolerance=args.tolerance)
         print(f"  {'CNN (' + Path(args.cnn).name + ')':<28} {acc:.3f}       {n_total}")
 
 
