@@ -449,7 +449,7 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     model = Segment3DCNN(base_ch=args.base_ch).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # When annotations are provided, save by held-out human-pair accuracy; otherwise by DDG-aligned top-1±1.
     save_by = "human_val" if args.annotations else "pm1"
