@@ -398,6 +398,8 @@ def main():
                              "Default 4 → ~7/28 held out for val human-pair accuracy.")
     parser.add_argument("--min_checkpoint", type=int, default=0,
                         help="Skip episodes from MAPF-GPT checkpoint_iter < this (default: 0 = use all)")
+    parser.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine", "plateau"],
+                        help="LR schedule: 'none' (constant), 'cosine' (CosineAnnealingLR), 'plateau' (ReduceLROnPlateau on top-1±1)")
     args = parser.parse_args()
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
@@ -451,6 +453,13 @@ def main():
     model = Segment3DCNN(base_ch=args.base_ch).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    if args.scheduler == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    elif args.scheduler == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=5)
+    else:
+        scheduler = None
+
     # When annotations are provided, save by held-out human-pair accuracy; otherwise by DDG-aligned top-1±1.
     save_by = "human_val" if args.annotations else "pm1"
 
@@ -475,7 +484,14 @@ def main():
         val_pm1s.append(pm1)
         val_top3s.append(top3)
 
-        msg = f"Epoch {epoch:3d} | loss {avg_loss:.4f} | top-1±1 {pm1:.3f} | top-3 {top3:.3f}"
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(pm1)
+            else:
+                scheduler.step()
+
+        cur_lr = optimizer.param_groups[0]["lr"]
+        msg = f"Epoch {epoch:3d} | lr {cur_lr:.2e} | loss {avg_loss:.4f} | top-1±1 {pm1:.3f} | top-3 {top3:.3f}"
 
         if all_annotations:
             hp_all, n_all = evaluate_human_pairs(model, episode_paths, all_annotations, device, args.context_segments)
