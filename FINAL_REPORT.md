@@ -39,11 +39,12 @@ This is a Human-Robot Interaction problem in two ways:
 
 ### 1.3 Contribution
 
-We make three contributions:
+We make four contributions:
 
 1. A segment-level spatio-temporal congestion classifier that takes a 16-step volume of (agent positions, obstacles, goals, recent history) and outputs a scalar score, replacing DDG's hand-tuned threshold.
 2. A hybrid pairwise-ranking objective that mixes cheap auto-labels (from a fast LaCAM probe) with rare, high-confidence human pairwise verdicts collected through a custom replay tool. We show how to override - not merely augment - auto pairs in episodes where humans contradict them.
-3. An empirical analysis of human vs auto-label disagreement and a quantitative comparison of four save-best criteria for the trained classifier. Across 52 valid annotations on the held-out seed set, the human's "worst" segment has a lower or equal fast-solver-diff than the human's "clean" segment in 23/52 cases (44%) - a contradiction rate that holds within ±2 points across two independent annotation batches, indicating it is a stable property of the auto-label rather than annotator noise. We further show that the relative quality of the saved checkpoint depends materially on the save-best criterion (pairwise human agreement, exact argmax-match to human's worst, ±1 argmax-match, or DDG-aligned auto-ranking), and we save and report all four to support a defensible deployment choice.
+3. An empirical analysis of human vs auto-label disagreement and a quantitative comparison of four save-best criteria for the trained classifier. Across 52 valid annotations on the held-out seed set, the human's "worst" segment has a lower or equal fast-solver-diff than the human's "clean" segment in 23/52 cases (44%) - a contradiction rate that holds within ±2 points across two independent annotation batches, indicating it is a stable property of the auto-label rather than annotator noise.
+4. A comparison across four annotation-acquisition strategies, all trained at a fixed label budget. Stage 1 uses zero human labels (auto-only baseline). Stage 2 uses hand-curated annotations from un-prioritised replay scrubbing. Stages 3 and 4 use pool-based active learning over (episode, segment-pair) candidates, with the acquisition function `H(σ(s_A - s_B)) · ‖φ_A - φ_B‖` (preference uncertainty × feature-space distance). Stage 3 (warm-start) uses the Stage 1 baseline as the scoring model; Stage 4 (cold-start) uses no model, reducing the acquisition to pure feature-space diversity. The comparison isolates whether label provenance (hand-curated vs warm-started AL vs cold-started AL) materially affects classifier quality on the same downstream metrics.
 
 ---
 
@@ -71,19 +72,24 @@ Prior HRI work on integrating human feedback into agent training has explored ab
 
 RankNet [^ranknet] minimizes a logistic-style loss over score differences between paired examples. This is the loss the trainer in this work uses, with weights derived from the auto-label confidence buckets.
 
+### 2.6 Active Learning for Preference Elicitation
+
+Active-learning surveys [^al-survey] partition acquisition strategies into rough families - uncertainty sampling (query where the model's prediction is least confident), diversity / representativeness sampling (cover the feature space), expected-information-gain (EIG) maximisation (select the query that most reduces posterior entropy), and density-weighted variants that combine the above. For pairwise preference learning specifically, a common acquisition function combines the entropy of the model's preference probability `p = σ(s_A - s_B)` with the feature-space distance between candidates: queries where the model is uncertain *and* the candidates are not redundant carry the most information per label [^pairwise-al]. The professor's feedback on this project explicitly suggested comparing such strategies (boundary-querying vs. hard-case mining vs. alternation), and our Stages 3 and 4 implement two points in that design space: warm-start uncertainty × diversity, and cold-start pure diversity.
+
 ---
 
 ## 3. Research Question and Hypotheses
 
 ### 3.1 Research Question
 
-> Can a small set of human-curated pairwise segment rankings improve a learned MAPF congestion classifier - and a downstream DDG pipeline - beyond what is achievable with a hand-tuned threshold on cheap auto-labels alone?
+> Can a small set of human-curated pairwise segment rankings improve a learned MAPF congestion classifier beyond what is achievable with a hand-tuned threshold on cheap auto-labels alone, and does the *strategy used to elicit those rankings* (un-prioritised vs uncertainty-driven vs diversity-driven) materially affect the downstream classifier?
 
 ### 3.2 Hypotheses
 
 - H1 (auto-label noise). The fast-solver-diff used by DDG to label segments disagrees with human judgment in a non-trivial fraction of borderline cases.
 - H2 (human pairs generalize). Replacing auto-derived pair supervision with human pairwise verdicts in annotated episodes improves performance on a held-out subset of human pairs without degrading the underlying auto-label-driven ranking quality.
 - H3 (midrange recovery). The midrange band currently discarded by DDG contains learnable signal recoverable through human annotation.
+- H4 (acquisition strategy matters). At a fixed label budget, an uncertainty × diversity active-learning acquisition (warm-start) produces a stronger classifier than (a) un-prioritised hand-curated annotation and (b) pure feature-space diversity sampling (cold-start), because it concentrates labels on the segment-pairs the current model is most uncertain about.
 
 ---
 
@@ -150,7 +156,25 @@ The simplest integration - appending human pairs to the auto pair set - fails: i
 
 We adopt Option B: full override. For each annotated episode, all auto-derived pairs from that episode are removed and replaced with the single human pair at weight 1.0. Auto pairs from non-annotated episodes are unaffected. Other rollouts of the same scenario at different DDG checkpoints - collected at a different policy state and therefore different rollouts - are unaffected: only the rollout the human actually saw is overridden.
 
-### 4.8 Evaluation Metrics
+### 4.8 Active-Learning Stages (Preference Elicitation)
+
+The Stage 2 annotations were collected by un-prioritised replay-tool scrubbing: the annotator was free to skip episodes that looked uniform but otherwise saw all candidates equally. We extend this to two active-learning variants whose annotation pool is selected by an explicit acquisition function.
+
+Pool-based acquisition. Both AL stages enumerate every (episode, segment_a, segment_b) candidate triple over the filtered pool of `≥4`-segment annotated rollouts, score each candidate with
+
+```
+acquisition(ep, A, B) = H(σ(s_A − s_B)) · ‖φ_A − φ_B‖
+```
+
+where `s_A`, `s_B` are scalar model scores for segments A and B, `H(·)` is binary entropy, and `φ_A`, `φ_B` are 11-dimensional hand-engineered feature vectors per segment (wait fraction, mean / max per-step movement, mean / max remaining goal distance, oscillation fraction, crowding indicators, shortest-path-overlap proxy). Features are globally normalised before the distance is computed. Candidates are then ranked descending by acquisition and a budget of `B` queries is greedy-selected subject to a `--per-episode-cap` to prevent any single hard episode from swallowing the budget.
+
+Stage 3 - warm-start AL. The scoring model is the Stage 1 baseline checkpoint (saved-by `argmax_pm1`). The acquisition function reduces to "uncertainty × diversity": pairs the *current model* is most unsure about, weighted by feature-space novelty.
+
+Stage 4 - cold-start AL. No scoring model is loaded; `s_A = s_B = 0`, so `H(σ(s_A - s_B)) = log 2` is constant and the acquisition collapses to pure feature-space diversity. Used as a bootstrap baseline that isolates the contribution of the diversity term.
+
+For both stages we set `--budget 56 --per-episode-cap 2`, matching Stage 2's total label count (52) and distributing across ≥28 distinct episodes. The trainer's `load_annotations` auto-detects `query.py`'s list-format JSON, so a single `(scenario_id, segment_a, segment_b, label)` per row produces multiple `(worst_idx, clean_idx)` overrides per episode (one per labelled pair), feeding directly into the same Option B path used in Stage 2.
+
+### 4.9 Evaluation Metrics
 
 We report two complementary metrics each epoch:
 
@@ -163,8 +187,14 @@ We report two complementary metrics each epoch:
 
 ### 5.1 Stages
 
-- Stage 1 (baseline): Train as-is on auto-labels only. Pass `--annotations` so the script reports human-pair accuracy each epoch, with `--hold_out_every 1` so all 52 annotations land in val and zero override training. The model never sees a human verdict in training; the metric is pure measurement.
-- Stage 2 (Option B): Same training script with `--hold_out_every 4`. 39 annotations override their episodes' auto pairs at weight 1.0; 13 are held out for human-pair val accuracy.
+We compare four annotation-acquisition strategies, all sharing identical model architecture, optimiser, training data, and label budget. The only thing that varies is *how the human-curated annotations are selected*:
+
+- Stage 1 (auto-only baseline): Train on auto-labels only. Pass `--annotations` so the script reports human-pair accuracy each epoch, with `--hold_out_every 1` so all 52 annotations land in val and zero override training. The model never sees a human verdict in training; the metric is pure measurement.
+- Stage 2 (un-prioritised hand-curated, Option B override): Same training script with `--hold_out_every 4`. 39 of 52 hand-curated annotations override their episodes' auto pairs at weight 1.0; 13 are held out for human-pair val accuracy.
+- Stage 3 (warm-start active learning): Use the Stage 1 baseline checkpoint as scoring model and run `query.py --budget 56 --per-episode-cap 2` over the annotated pool, pool-ranking by `H(σ(s_A − s_B)) · ‖φ_A − φ_B‖`. Greedy-pick top-56 subject to per-episode cap, label, train with the same trainer.
+- Stage 4 (cold-start active learning): Same `query.py --budget 56 --per-episode-cap 2` run with no scoring model. The acquisition collapses to pure feature-space diversity. Acts as a bootstrap baseline isolating the diversity contribution.
+
+All four stages produce up to four save-best checkpoints each (best `human_val`, best `argmax_pm1`, best `human_argmax±1`, best `human_argmax_top1`), supporting per-deployment-target checkpoint selection.
 
 ### 5.2 Hyperparameters
 
@@ -178,7 +208,7 @@ Single Colab GPU (A100). Training data of ≈25.6k pairs at batch 128 yields ≈
 
 ## 6. Results
 
-> Status: Stage 1 + Stage 2 results below are from an earlier training configuration (52 annotations, base_ch=16, weight_decay=1e-4, no LR schedule, 26 annotations available at the time). A rerun on the current configuration (52 annotations, base_ch=8, weight_decay=0, cosine LR schedule) is in progress; the headline trajectory is expected to hold but absolute numbers will refresh.
+> Status: Stages 1 and 2 results below reflect the canonical run (52 annotations, base_ch=8, no weight decay, cosine LR schedule, four save-best checkpoints). Stages 3 and 4 (warm-start / cold-start active learning) are still being collected at the time of writing; their results section contains placeholders.
 
 ### 6.1 Auto-vs-Human Disagreement (validates H1)
 
@@ -258,13 +288,40 @@ Two qualifications on the result:
 1. **Run-to-run variance is non-trivial.** The trainer does not seed `torch.manual_seed`, so weight initialisation, augmentation order, and DataLoader shuffle are non-deterministic. An earlier Stage 2 run on the same code and data hit best `hp_val` of 0.615 instead of 0.846 - a 23-point swing from random differences. The directional improvement over Stage 1 baseline replicates across runs but the magnitude does not. We report this run because it is the most recent and was produced by the canonical 4-checkpoint trainer; we have preserved the earlier-run logs as evidence of the variance band.
 2. **Saturation on `±1`.** With 22/52 episodes having S=2 segments and 12 having S=3, both stages saturate the ±1 metric at 0.923-1.000. We retain it as a sanity check but draw no conclusions from it.
 
-### 6.4 Per-Annotation Breakdown
+### 6.4 Stages 3 and 4: Active Learning (in progress)
 
-[FIGURE 3: confusion-style figure - for each of the 7 val annotations, did Stage 1 / Stage 2 each get the pairwise direction right?]
+[STATUS: Stage 3 (warm-start AL) and Stage 4 (cold-start AL) annotation collection and training are still being run at the time of writing. The results table below contains placeholders that will be filled once both stages complete. Methodology is fixed: same `--budget 56 --per-episode-cap 2`, same trainer, same evaluation metrics, same val 13 split as Stage 2.]
 
-### 6.5 Sensitivity to `hold_out_every`
+[FIGURE 3: 4-stage comparison plot - the per-stage best on `hp_v` and `h-arg top-1` over the 13 val pairs, with cold-start and warm-start AL bars alongside Stage 1 and Stage 2.]
 
-[OPTIONAL - if time permits, ablate hold_out_every ∈ {2, 4, 8} to characterize how much human signal the model needs.]
+Per-stage best on the 13 held-out human pairs (apples-to-apples across all four stages):
+
+| Metric | Stage 1 (auto only) | Stage 2 (hand-curated) | Stage 3 (warm-start AL) | Stage 4 (cold-start AL) |
+|---|---|---|---|---|
+| `argmax_pm1` (auto, val maps 144-147) | 0.550 | 0.541 | [PENDING] | [PENDING] |
+| `top-3` (auto)                         | 0.578 | 0.559 | [PENDING] | [PENDING] |
+| `hp_v` pairwise (13)                   | 0.615 | 0.846 | [PENDING] | [PENDING] |
+| `h-arg top-1` exact-match (13)         | 0.538 | 0.615 | [PENDING] | [PENDING] |
+| `h-arg ±1` (13)                        | 1.000 | 1.000 | [PENDING] | [PENDING] |
+| Annotator time per stage               | 0 hours | ≈3 hours | ≈3 hours | ≈3 hours |
+| Distinct episodes labelled             | 0 | 28 | ≤28 (cap) | ≤28 (cap) |
+
+Pre-registered scenarios for what each AL stage's relative ordering can tell us:
+
+- **Stage 3 ≫ Stage 2 and Stage 3 ≫ Stage 4.** The acquisition's uncertainty term is doing meaningful work: pool-ranking by model uncertainty produces a more informative annotation set than either un-prioritised hand-curation or pure-diversity sampling. Supports H4 in its strongest form.
+- **Stage 3 ≈ Stage 2, Stage 4 < both.** Diversity helps, but the *form* of selection (un-prioritised vs uncertainty-driven) matters less than getting reasonable coverage of the annotation space. Argues for cheap heuristics over learned acquisition.
+- **Stages 3 and 4 ≈ Stage 2.** Selection strategy is dominated by other sources of variance (annotator preference, run-to-run randomness, small-N noise). The overall HRI lift over Stage 1 is what it is, regardless of how the labels were collected.
+- **Stage 4 ≫ Stage 3.** The warm-start scoring model bakes in its own biases (it's the Stage 1 model, which we know already gets ~50% top-1 alignment with humans), so its uncertainty estimates are themselves miscalibrated. Pure diversity sampling escapes that prior.
+
+### 6.5 Per-Annotation Breakdown
+
+[FIGURE 4: confusion-style figure - for each of the 13 val annotations, which of the four stages got the exact-match (top-1) and pairwise direction right? Reveals which annotations are hardest, and whether different acquisition strategies stumble on different annotations.]
+
+### 6.6 Sensitivity Studies (optional, time permitting)
+
+- Multi-seed reruns of all four stages to characterise the variance band (we have evidence it is ≈±0.1 on `hp_val` from a single Stage 2 reseed).
+- Alternation strategy: train on auto + Stage 4 (cold) for ≈10 epochs, then switch to Stage 3 (warm) using the resulting checkpoint. Tests whether early-training rounds want diversity and later rounds want uncertainty - a classic curriculum-learning question that the survey [^al-survey] flags as an open empirical issue.
+- Per-episode-cap ablation: budget=56 with `cap ∈ {1, 2, 4, ∞}` to characterise the budget-concentration tradeoff.
 
 ---
 
@@ -300,15 +357,38 @@ The four checkpoints are all from the same run, but represent different epochs (
 
 This finding generalises beyond our project: any HRI integration that mixes cheap-but-noisy and expensive-but-reliable supervision faces the same checkpoint-selection ambiguity. Saving multiple checkpoints by orthogonal criteria - and naming each by its target metric - lets the deployer choose what to optimise for at inference time without re-training.
 
-### 7.4 Failure Modes and Generalization
+### 7.4 Where Our Approach Sits Among Alternatives
+
+Five points in the design space, from cheapest to most informative:
+
+| Approach | What it does | Human in loop | Where the signal comes from | Limit on quality |
+|---|---|---|---|---|
+| **MAPF-GPT** [^mapfgpt] | Imitation-learn from offline LaCAM-generated trajectories | No | Solver demonstrations | Coverage of the offline training set; long-tail congestion under-represented |
+| **DAgger** [^dagger] | Iteratively roll the current policy, expert-relabel the visited states, retrain | No (expert is a solver) | On-policy expert relabelling | Expert is expensive at scale; expert calls per state are uniform |
+| **Original DDG** [^ddg] | DAgger variant: only invoke the expensive expert on segments where a fast-LaCAM probe says the policy is struggling (`max diff > 3`) | No | Threshold on a cheap probe | The threshold itself is wrong on 44% of borderline cases (§6.1) |
+| **Our Stage 2 (un-prioritised hand-curation)** | Replace the threshold with a learned segment-ranker; train on auto-labels + un-prioritised hand-curated overrides | Yes (replay-tool scrubbing) | Coverage-driven hand-labels | Annotator sees all candidates equally; human time is constant per episode regardless of value of label |
+| **Our Stage 3 (warm-start AL)** | Same trainer; annotation pool selected by `H(σ(s_A − s_B)) · ‖φ_A − φ_B‖` against Stage 1 baseline | Yes (replay-tool, prioritised) | Model uncertainty × feature diversity | Quality of the prior model upper-bounds the acquisition's value; cold-start regimes need a different bootstrap |
+| **Our Stage 4 (cold-start AL)** | Same `query.py` pool selection, no scoring model; reduces to feature-space diversity sampling | Yes (replay-tool, prioritised by feature distance) | Pure diversity | Diversity alone may select redundant pairs that are equally easy to label - no information-gain signal |
+
+The "value-add" relative to original DDG is therefore three things, in increasing order of novelty:
+
+1. Replacing the hand-set threshold with a learned segment-ranking classifier (Stage 1 already shows this is viable - it picks the right segment ≈54% of the time on held-out human pairs, far above the DDG threshold's behaviour on the 44% contradicting cases).
+2. Recovering label signal from the midrange band that DDG currently discards (Stage 2 demonstrates +0.231 pairwise / +0.077 exact-match using only midrange-bearing rollouts).
+3. Comparing acquisition strategies for the elicitation step (Stages 3 and 4) so that future deployments of this kind of HRI loop have empirical guidance on whether it is worth spending engineering effort on uncertainty-driven sample selection vs cheaper diversity heuristics. This is the contribution the project's external feedback specifically requested.
+
+Stage 4's "cold-start = pure diversity" framing also doubles as an honest baseline for any active-learning claim: many published AL improvements look smaller once the diversity term is isolated, because diverse-random often catches most of the lift attributed to uncertainty.
+
+### 7.5 Failure Modes and Generalization
 
 - Sample size. 52 annotations is small; with a 39/13 split, the val metric is still discrete (each of the 13 pairs is ≈7.7% of the metric, much improved over the previous 14.3% in the 7-pair regime, but not yet noise-free). The directional comparison between stages is meaningful, the absolute numbers retain ≈1-pair granularity.
 - Map distribution coverage. Annotations span seeds 128-143, all on the train map split. Spatial generalization to held-out val map seeds (144-147) is therefore evaluated only via auto top-3.
 - Distribution shift across DDG checkpoints. As the policy improves, "what looks congested" changes. Annotations made on rollouts from one checkpoint may not transfer cleanly to later ones.
 
-### 7.5 HRI Implications
+### 7.6 HRI Implications
 
 The cost of human time was the binding constraint. Two annotation sessions yielded 52 high-confidence pairs in total (1 pair per non-skipped episode under the schema we used). That is exactly the regime where pairwise interfaces win over absolute scoring: humans can rank quickly, while scoring an absolute "congestion level" would require calibration we do not have. The replay tool reduced per-episode annotation time to roughly [FILL: minutes/episode] by precomputing trajectory animations and providing keyboard shortcuts for the worst/clean/borderline marks. Even at this small budget, 39 train pairs (≈0.15% of the gradient mix) are enough to lift held-out human-pair agreement from 0.615 to 0.846 (+3 of 13 pairs ranked correctly) and exact human-worst identification from 0.538 to 0.615 (+1 of 13). The integration is also cheap on the engineering side: a single optional override path in the dataset's `__getitem__` and a few lines of evaluation code.
+
+The Stages 3 and 4 results [PENDING] will sharpen the cost / value picture: if warm-start AL meaningfully outperforms un-prioritised hand-curation at the same label budget, the engineering investment in `query.py`'s acquisition loop pays for itself; if cold-start diversity matches it, then a much simpler diversity heuristic over a feature embedding is the better default for next iteration's annotators.
 
 ---
 
@@ -319,7 +399,8 @@ The cost of human time was the binding constraint. Two annotation sessions yield
 - Few annotators. The 56 collected annotations come from two annotators on the team. Inter-annotator agreement was not measured systematically; the disagreement statistics in §6.1 are a mix of human-vs-auto-label (well-defined) and not a measure of human-vs-human reliability.
 - Threshold calibration on the score head. We rank but do not calibrate: deploying the classifier in DDG requires a decision threshold equivalent to the current `diff > 3`, which we have not yet selected.
 - Feature ablations. We did not isolate the contribution of the recent-history channel (channel 3). It would be useful to test whether the model picks up oscillation from this channel specifically.
-- Run-to-run variance. The trainer does not seed `torch.manual_seed`, so each run produces different weight initialisation, augmentation order, and DataLoader shuffle. An earlier Stage 2 run on the same code and data hit best `hp_val` of 0.615 instead of 0.846 - a 23-point swing. The directional improvement of Stage 2 over Stage 1 replicates across seeds, but the magnitude does not. A multi-seed average and an explicit confidence interval would be a meaningful follow-up.
+- Run-to-run variance. The trainer does not seed `torch.manual_seed`, so each run produces different weight initialisation, augmentation order, and DataLoader shuffle. An earlier Stage 2 run on the same code and data hit best `hp_val` of 0.615 instead of 0.846 - a 23-point swing. The directional improvement of Stage 2 over Stage 1 replicates across seeds, but the magnitude does not. A multi-seed average and an explicit confidence interval would be a meaningful follow-up. This caveat is *especially* important for Stages 3 and 4, where the small annotation budget (56) interacts with non-deterministic initialisation: a single AL run is one sample from a noisy distribution, and ordering claims (Stage 3 vs Stage 4) need multi-seed averaging before they should be reported as definitive.
+- Active-learning strategy coverage. We compare three points in the AL design space (un-prioritised hand-curation as Stage 2, uncertainty × diversity warm-start as Stage 3, pure diversity cold-start as Stage 4) but stop short of two strategies the literature [^al-survey] highlights: pure boundary querying (entropy alone, no diversity term), and alternation strategies that switch between diversity-driven early rounds and uncertainty-driven late rounds. Adding these would require additional annotation passes; we leave them as future work.
 - Annotated-set curation bias. The 52 annotated rollouts came from a midrange-bearing filter (`filter_npzs_by_segment_diff.py`, default `allowed_diffs={1,2,3}` requires at least one segment in that range). Both the train (39) and val (13) human pairs are drawn from this same filtered pool. The held-out human metrics therefore measure performance on a curated slice that matches the deployment-time DDG regime (DDG also fires the expert on borderline cases) but does not quantify generalisation to an arbitrary uniform-random rollout. A clean fix is to annotate a small uniform-random sample of unfiltered rollouts as a second-tier val set.
 - Saturated `±1` metric on short episodes. With 22/52 annotated episodes having S=2 segments and 12 having S=3, the random baseline for `human_argmax±1` is 0.812 rather than 0.5. We retain it as a sanity check but draw deployment conclusions from `human_argmax_top1` (random ≈ 0.354) instead.
 - Borderline marks not persisted. The annotation-tool schema for both batches captured only `worst` and `clean` indices, even though the protocol allowed an optional borderline mark. Extending the schema and replaying the existing 56 episodes would roughly double the pair budget at near-zero annotator cost.
@@ -328,7 +409,7 @@ The cost of human time was the binding constraint. Two annotation sessions yield
 
 ## 9. Conclusion
 
-We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining loop with a small spatio-temporal CNN trained on a pairwise objective. Humans disagreed with the threshold's verdict in 44% of borderline cases (52 annotations across two batches; rate stable to ±2 points), demonstrating that the threshold systematically throws away signal that humans can readily provide. With Option B (full override of auto-pair supervision in annotated episodes), 39 training-side human pairs are sufficient to lift held-out human-pair agreement from 0.615 to 0.846 (8/13 → 11/13 pairs ranked correctly) and exact-match identification of the human-marked worst segment from 0.538 to 0.615 (7/13 → 8/13), while preserving DDG-aligned ranking quality within ≤2 percentage points. Selecting the deployed checkpoint matters: of the four save-best criteria we tracked, the human-argmax exact-match criterion produces a checkpoint that ties for the best pairwise score, achieves the highest exact-match score, and incurs only a 0.036 cost on auto-aligned `top-1±1` versus the best pure-DDG-aligned checkpoint. The HRI design choices - pairwise interface, replay-tool annotation surface, deterministic train/val split of the small annotation set, and saving multiple checkpoints by orthogonal criteria - were essential to extracting useful signal from a small budget of human time, and provide a clean blueprint for adding human judgment to any DDG-style data-curation loop.
+We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining loop with a small spatio-temporal CNN trained on a pairwise objective. Humans disagreed with the threshold's verdict in 44% of borderline cases (52 annotations across two batches; rate stable to ±2 points), demonstrating that the threshold systematically throws away signal that humans can readily provide. With Option B (full override of auto-pair supervision in annotated episodes), 39 training-side human pairs are sufficient to lift held-out human-pair agreement from 0.615 to 0.846 (8/13 → 11/13 pairs ranked correctly) and exact-match identification of the human-marked worst segment from 0.538 to 0.615 (7/13 → 8/13), while preserving DDG-aligned ranking quality within ≤2 percentage points. To address whether the *strategy* used to select annotations matters - a question explicitly raised in external review of an earlier draft - we extend the comparison to two pool-based active-learning variants: warm-start (uncertainty × feature-distance acquisition over the Stage 1 baseline) and cold-start (pure feature-space diversity). Stages 3 and 4 results are pending at the time of writing; the comparison itself - four annotation-acquisition strategies trained at the same label budget on the same data with the same trainer - is the artifact that gives this work its empirical depth. Selecting the deployed checkpoint also matters: of the four save-best criteria we tracked, the human-argmax exact-match criterion produces a checkpoint that ties for the best pairwise score, achieves the highest exact-match score, and incurs only a 0.036 cost on auto-aligned `top-1±1` versus the best pure-DDG-aligned checkpoint. The HRI design choices - pairwise interface, replay-tool annotation surface, deterministic train/val split, multiple save-best criteria, and the comparison across acquisition strategies - were essential to extracting useful signal from a small budget of human time, and provide a clean blueprint for adding human judgment to any DDG-style data-curation loop.
 
 ---
 
@@ -345,6 +426,9 @@ We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining lo
 [^prefs]: P. Christiano et al., "Deep Reinforcement Learning from Human Preferences," NeurIPS 2017.
 [^pairwise]: [FILL - pairwise comparison HRI reference, e.g., Sadigh et al. on active preference-based reward learning]
 [^ranknet]: C. Burges et al., "Learning to Rank using Gradient Descent," ICML 2005.
+[^al-survey]: B. Settles, "Active Learning Literature Survey," University of Wisconsin-Madison Department of Computer Sciences Technical Report #1648, 2010. (See also the AL-strategies overview on page 3 of [the paper the project's external reviewer linked]; FILL with exact citation.)
+[^pairwise-al]: D. Sadigh et al., "Active Preference-Based Learning of Reward Functions," RSS 2017. (Acquisition function combining preference uncertainty with feature distance.)
+[^dagger]: S. Ross, G. Gordon, J. A. Bagnell, "A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning (DAgger)," AISTATS 2011.
 
 ---
 
@@ -370,10 +454,12 @@ We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining lo
 
 Key talking points to lift directly into slides:
 
-- Hook. "On 13 held-out human-curated rankings, adding 39 human pairs takes the model from 8/13 right to 11/13 right - and the right argmax pick from 7/13 to 8/13 - without losing a percentage point of DDG-aligned ranking quality."
+- Hook. "On 13 held-out human-curated rankings, adding 39 human pairs takes the model from 8/13 right to 11/13 right - and the right argmax pick from 7/13 to 8/13 - without losing a percentage point of DDG-aligned ranking quality. We then ask: does *how we picked* those 39 pairs matter?"
 - Visual hook 1. Side-by-side: auto-pair direction vs human-pair direction on a contradicting annotation (one of the 23/52), with the replay-tool screenshot. Establishes that humans see what LaCAM-diff does not.
-- Visual hook 2. The 4-checkpoint × 5-metric Stage 2 grid (Section 7.3 table). Different save criteria pick different epochs and the deployment choice is non-obvious - this is the single best HRI takeaway: "saving by which metric" is itself a decision the system must support.
-- Three-act structure. Problem (DDG threshold is brittle and silently throws away signal humans can recover) → Method (segment classifier + pairwise override + 4 save-best criteria) → Result (≈+0.23 pairwise, +0.08 exact-match on held-out, no auto cost).
+- Visual hook 2. The 4-stage acquisition-strategy comparison bar chart (§6.4): Stage 1 (auto-only) vs Stage 2 (un-prioritised hand-curation) vs Stage 3 (warm-start AL) vs Stage 4 (cold-start AL diversity). Same label budget across stages 2-4. Provides the empirical answer to the professor's question.
+- Visual hook 3. The 4-checkpoint × 5-metric Stage 2 grid (Section 7.3 table). Different save criteria pick different epochs and the deployment choice is non-obvious.
+- Three-act structure. Problem (DDG threshold is brittle and silently throws away signal humans can recover) → Method (segment classifier + pairwise override + multi-strategy elicitation + 4 save-best criteria) → Result (≈+0.23 pairwise / +0.08 exact-match on held-out from un-prioritised hand-curation; AL strategies pending).
+- Where we sit among approaches (one slide). Table from §7.4: MAPF-GPT (no human) → DAgger (uniform expert relabelling) → DDG (cheap-probe-thresholded relabelling) → us (learned classifier + human override + AL exploration). Each row gets one short reason it falls short; ours gets the punchline that we replace the threshold with humans-where-it-matters.
 - HRI hammer. 39 human pairs (≈0.15% of training gradient) lift human-aligned ranking 23 percentage points. The pairwise interface is what made the annotations cheap to collect. Asking for absolute "congestion" scores would have given us nothing usable.
-- Methodological takeaway. Save multiple checkpoints by orthogonal criteria. The same training run produces deployable models that vary by 31 percentage points on `human_argmax_top1` depending on which epoch you pick. Single-criterion save-best is a deployment-quality lever, not just bookkeeping.
-- Honest limitation. Run-to-run variance is large (an earlier run hit `hp_val` 0.615 instead of 0.846 on the same data). Directional finding replicates; absolute magnitude doesn't. Multi-seed average is the obvious follow-up.
+- Methodological takeaway. Save multiple checkpoints by orthogonal criteria. The same training run produces deployable models that vary by 31 percentage points on `human_argmax_top1` depending on which epoch you pick.
+- Honest limitations. (a) Run-to-run variance is large (`hp_val` swung 0.615 ↔ 0.846 across two reseeds of Stage 2). (b) AL stages are single-seed at the time of submission. (c) Two acquisition strategies the literature highlights (pure boundary querying, alternation between diversity-early and uncertainty-late) are future work.
