@@ -5,10 +5,24 @@ The classifier takes a 16-step trajectory segment as input and outputs a scalar
 congestion score. Training uses RankNet pairwise loss: within each episode,
 segments with higher LaCAM diff should receive higher scores.
 
+Four-stage workflow (controlled by --annotations):
+
+  Stage 1 — auto labels only (omit --annotations, or pass it with
+            --hold_out_every 1 so all annotations stay in val).
+  Stage 2 — auto + hand-curated annotations.json (Option B overrides).
+  Stage 3 — auto + warm-start preference elicitation (annotations produced
+            by `query.py --model-path <stage-1-ckpt>`; uncertainty × diversity).
+  Stage 4 — auto + cold-start preference elicitation (annotations produced
+            by `query.py` with no --model-path; pure feature-distance diversity).
+
+Stages 3 and 4 reuse --annotations: load_annotations auto-detects the
+elicitation list format produced by query.py.
+
 Usage:
-    python finetuning/train_segment_classifier.py \
+    python train_segment_classifier.py \
         --data dataset/held_out \
         --output out/segment_classifier.pt \
+        --annotations annotations.json \
         --epochs 30
 """
 
@@ -36,26 +50,59 @@ DIFF_CONFIDENT_NEG = 1
 # Annotations
 # ---------------------------------------------------------------------------
 
-def load_annotations(path) -> Dict[str, Tuple[int, int]]:
-    """Read annotations.json → {scenario_id: (worst_idx, clean_idx)}.
-    Drops entries with missing indices or worst==clean."""
+def load_annotations(path) -> Dict[str, List[Tuple[int, int]]]:
+    """Read annotations file → {scenario_id: [(worst_idx, clean_idx), ...]}.
+
+    Two formats are accepted, auto-detected by JSON shape:
+
+      • Original (Stage 2): dict keyed by scenario_id, with keys
+        ``worst_congestion_failure_segment_index`` and ``clearly_clean_segment_index``.
+        Always produces a single-element list per scenario.
+
+      • Elicitation (Stages 3–4, produced by query.py): list of per-pair
+        entries with ``segment_a``, ``segment_b``, ``chosen_worse_segment``,
+        and ``label``. Entries labelled ``unsure_or_skipped`` are dropped.
+        A scenario_id that appears in multiple labelled pairs (pool-mode AL
+        with --per-episode-cap > 1) accumulates all of them.
+
+    Entries with missing indices or worst==clean are dropped.
+    """
     with open(path) as f:
         raw = json.load(f)
-    out: Dict[str, Tuple[int, int]] = {}
+
+    out: Dict[str, List[Tuple[int, int]]] = {}
+
+    if isinstance(raw, list):
+        for entry in raw:
+            sid = entry.get("scenario_id")
+            chosen = entry.get("chosen_worse_segment")
+            a = entry.get("segment_a")
+            b = entry.get("segment_b")
+            if sid is None or chosen is None or a is None or b is None:
+                continue
+            a, b, chosen = int(a), int(b), int(chosen)
+            if a == b or chosen not in (a, b):
+                continue
+            worst = chosen
+            clean = b if chosen == a else a
+            out.setdefault(sid, []).append((worst, clean))
+        return out
+
     for sid, entry in raw.items():
         wi = entry.get("worst_congestion_failure_segment_index")
         ci = entry.get("clearly_clean_segment_index")
         if wi is None or ci is None or int(wi) == int(ci):
             continue
-        out[sid] = (int(wi), int(ci))
+        out[sid] = [(int(wi), int(ci))]
     return out
 
 
 def split_annotations(
-    annotations: Dict[str, Tuple[int, int]], hold_out_every: int = 4
-) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Tuple[int, int]]]:
+    annotations: Dict[str, List[Tuple[int, int]]], hold_out_every: int = 4
+) -> Tuple[Dict[str, List[Tuple[int, int]]], Dict[str, List[Tuple[int, int]]]]:
     """Deterministic split: every `hold_out_every`-th annotation (sorted by id)
-    becomes val; the rest become train."""
+    becomes val; the rest become train. Splits at the scenario level so that
+    all pairs for a given episode go to the same side."""
     train, val = {}, {}
     for i, sid in enumerate(sorted(annotations)):
         (val if i % hold_out_every == 0 else train)[sid] = annotations[sid]
@@ -218,14 +265,15 @@ class SegmentPairDataset(Dataset):
         map_seed_filter: set,
         augment: bool = False,
         context_segments: int = 1,
-        human_overrides: Optional[Dict[str, Tuple[int, int]]] = None,
+        human_overrides: Optional[Dict[str, List[Tuple[int, int]]]] = None,
     ):
         self.episodes = []
         self.pairs: List[Tuple[int, int, int, float]] = []  # (ep_idx, seg_i, seg_j, weight)
         self.augment = augment
         self.context_segments = context_segments
         human_overrides = human_overrides or {}
-        self.n_overridden = 0  # episodes whose pair list got replaced by a human pair
+        self.n_overridden = 0  # episodes whose pair list got replaced by human pair(s)
+        self.n_human_pairs = 0  # total human-pair training items added
 
         for path in sorted(episode_paths):
             data = np.load(str(path), allow_pickle=True)
@@ -239,14 +287,18 @@ class SegmentPairDataset(Dataset):
                 "segment_diffs": data["segment_diffs"],
             })
 
-            # Option B: if this is an annotated rollout with a human verdict,
-            # replace all auto-generated pairs from this episode with the single human pair.
+            # Option B: if this is an annotated rollout with human verdict(s),
+            # replace all auto-generated pairs from this episode with the human pair(s).
             sid = path.stem
             if is_annotated_npz(path) and sid in human_overrides:
-                wi, ci = human_overrides[sid]
                 S = len(data["segment_diffs"]) - (context_segments - 1)
-                if 0 <= wi < S and 0 <= ci < S:
-                    self.pairs.append((ep_idx, wi, ci, 1.0))
+                added_any = False
+                for wi, ci in human_overrides[sid]:
+                    if 0 <= wi < S and 0 <= ci < S:
+                        self.pairs.append((ep_idx, wi, ci, 1.0))
+                        self.n_human_pairs += 1
+                        added_any = True
+                if added_any:
                     self.n_overridden += 1
                 continue  # skip auto pairs for this episode
 
@@ -310,27 +362,30 @@ class Segment3DCNN(nn.Module):
 def evaluate_human_pairs(
     model: "Segment3DCNN",
     episode_paths: List[Path],
-    annotations: Dict[str, Tuple[int, int]],
+    annotations: Dict[str, List[Tuple[int, int]]],
     device: str,
     context_segments: int = 1,
 ) -> Tuple[float, int]:
-    """Pairwise accuracy: fraction of (worst, clean) pairs where score(worst) > score(clean)."""
+    """Pairwise accuracy: fraction of (worst, clean) pairs where score(worst) > score(clean).
+    Each episode contributes one entry per labeled pair (so episodes with multiple
+    pool-mode labels weigh more)."""
     model.eval()
     correct = total = 0
-    for sid, (wi, ci) in annotations.items():
+    for sid, pair_list in annotations.items():
         path = annotation_path_for(sid, episode_paths)
         if path is None:
             continue
         data = np.load(str(path), allow_pickle=True)
         S = len(data["segment_diffs"]) - (context_segments - 1)
-        if not (0 <= wi < S and 0 <= ci < S):
-            continue
-        feat_w = featurize_segment(data["obstacles"], data["positions"], data["goals"], wi, context_segments=context_segments)
-        feat_c = featurize_segment(data["obstacles"], data["positions"], data["goals"], ci, context_segments=context_segments)
-        x = torch.from_numpy(np.stack([feat_w, feat_c])).to(device)
-        scores = model(x).cpu().numpy()
-        correct += int(scores[0] > scores[1])
-        total += 1
+        for wi, ci in pair_list:
+            if not (0 <= wi < S and 0 <= ci < S):
+                continue
+            feat_w = featurize_segment(data["obstacles"], data["positions"], data["goals"], wi, context_segments=context_segments)
+            feat_c = featurize_segment(data["obstacles"], data["positions"], data["goals"], ci, context_segments=context_segments)
+            x = torch.from_numpy(np.stack([feat_w, feat_c])).to(device)
+            scores = model(x).cpu().numpy()
+            correct += int(scores[0] > scores[1])
+            total += 1
     return (correct / total if total > 0 else 0.0), total
 
 
@@ -338,28 +393,41 @@ def evaluate_human_pairs(
 def evaluate_human_worst_match(
     model: "Segment3DCNN",
     episode_paths: List[Path],
-    annotations: Dict[str, Tuple[int, int]],
+    annotations: Dict[str, List[Tuple[int, int]]],
     device: str,
     context_segments: int = 1,
 ) -> Tuple[float, float, float, int]:
     """For each annotated episode, score every segment and check how close
-    argmax(scores) is to the human's worst_idx.
+    argmax(scores) is to the human's worst segment.
 
     Returns (top1, top1_pm1, top3, n_episodes_evaluated).
-      top1     — argmax(scores) == human worst_idx
-      top1_pm1 — |argmax(scores) - human worst_idx| ≤ 1   (deployment-shape; mirrors the auto top-1±1)
-      top3     — human worst_idx ∈ top-3 by score
+      top1     — argmax(scores) == human worst
+      top1_pm1 — |argmax(scores) - human worst| ≤ 1   (deployment-shape; mirrors the auto top-1±1)
+      top3     — human worst ∈ top-3 by score
+
+    For pool-mode annotations (multiple pairs per episode), the per-episode
+    "human worst" is the segment that appears most often as `worst` across
+    that episode's labeled pairs. Ties are broken by lowest index.
     """
+    from collections import Counter
+
     model.eval()
     t1 = pm1 = t3 = total = 0
-    for sid, (wi, _ci) in annotations.items():
+    for sid, pair_list in annotations.items():
         path = annotation_path_for(sid, episode_paths)
         if path is None:
             continue
         data = np.load(str(path), allow_pickle=True)
         S = len(data["segment_diffs"]) - (context_segments - 1)
-        if S < 2 or not (0 <= wi < S):
+        if S < 2:
             continue
+
+        # Majority vote on worst (one prediction per episode).
+        votes = Counter(w for w, _c in pair_list if 0 <= w < S)
+        if not votes:
+            continue
+        wi = min(c for c, n in votes.items() if n == max(votes.values()))
+
         feats = np.stack([
             featurize_segment(data["obstacles"], data["positions"], data["goals"], s, context_segments=context_segments)
             for s in range(S)
@@ -487,7 +555,10 @@ def main():
     )
     print(f"Train pairs: {len(train_dataset)}  |  Val pairs: {len(val_dataset)}")
     if args.annotations:
-        print(f"  ↳ {train_dataset.n_overridden} train episodes had auto pairs replaced by human pair")
+        print(
+            f"  ↳ {train_dataset.n_overridden} train episodes had auto pairs replaced "
+            f"by {train_dataset.n_human_pairs} human pair(s) total"
+        )
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
