@@ -55,20 +55,12 @@ def already_labeled_episode(annotations, scenario_id):
     return any(ann.get("scenario_id") == scenario_id for ann in annotations)
 
 
-# ---------------------------------------------------------------------
 # Segment handling
-# ---------------------------------------------------------------------
+
 
 def infer_segment_ranges(num_steps, num_segments):
     """
     Infer segment timestep ranges from the number of segment_diffs.
-
-    This follows the same assumption as the replay viewer:
-    if the .npz has S segment_diffs, split the T timesteps into S
-    approximately equal ranges.
-
-    If your dataset later stores exact segment boundaries, replace this
-    function with those stored boundaries.
     """
     if num_segments <= 1:
         return [(0, num_steps - 1)]
@@ -89,18 +81,12 @@ def extract_segment_arrays(positions, segment_range):
     start, end = segment_range
     return positions[start:end + 1]
 
-
-# ---------------------------------------------------------------------
 # Feature extraction
-# ---------------------------------------------------------------------
+
 
 def shortest_path_overlap_proxy(segment_positions, goals):
     """
     Approximate shortest-path overlap / shared corridor pressure.
-
-    This is intentionally lightweight and solver-free:
-    for each timestep, estimate how many agents share rows or columns
-    with other agents while moving toward goals.
 
     Higher values roughly indicate more shared corridors and possible
     congestion pressure.
@@ -149,10 +135,6 @@ def extract_segment_features(positions, goals, obstacles, segment_ranges):
     Return:
         features: np.ndarray, shape (S, D)
         feature_names: list[str]
-
-    Features are deliberately simple and interpretable. They are meant to
-    support active query selection, not replace your eventual 3D CNN feature
-    representation.
     """
     features = []
 
@@ -281,19 +263,14 @@ def normalize_features(features):
     return (features - mean) / (std + EPS)
 
 
-# ---------------------------------------------------------------------
-# Optional model scoring
-# ---------------------------------------------------------------------
+# For SHANE: model scoring
 
 def load_torch_model(model_path):
     """
-    Optional model loading.
 
     Expects a PyTorch model saved with torch.save(model, path), where:
         model(features_tensor) -> scores
 
-    If your project saves state_dicts instead, adapt this function to
-    recreate your model class before loading weights.
     """
     if model_path is None:
         return None
@@ -332,10 +309,7 @@ def score_segments(features, model=None):
     return scores.astype(np.float32)
 
 
-# ---------------------------------------------------------------------
 # Candidate pair selection
-# ---------------------------------------------------------------------
-
 def build_candidate_pairs(num_segments):
     return list(combinations(range(num_segments), 2))
 
@@ -375,9 +349,7 @@ def choose_best_pair(features, scores):
     return best
 
 
-# ---------------------------------------------------------------------
 # Visualization
-# ---------------------------------------------------------------------
 
 def draw_segment(ax, positions, goals, obstacles, segment_range, title, agent_colors):
     H, W = obstacles.shape
@@ -538,9 +510,7 @@ def show_pair(npz_path, positions, goals, obstacles, segment_ranges, segment_dif
     plt.show()
 
 
-# ---------------------------------------------------------------------
 # Interactive query loop
-# ---------------------------------------------------------------------
 
 def prompt_user_for_label():
     print()
