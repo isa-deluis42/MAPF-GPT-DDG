@@ -1,7 +1,7 @@
 {
   "maze_ms128_ss1001_na16": {
     "scenario_id": "maze_ms128_ss1001_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms128_ss1001_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms128_ss1001_na16.npz",
     "num_steps": 48,
     "num_segments": 3,
     "segment_diffs": [
@@ -18,7 +18,7 @@
   },
   "maze_ms128_ss1001_na32": {
     "scenario_id": "maze_ms128_ss1001_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms128_ss1001_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms128_ss1001_na32.npz",
     "num_steps": 51,
     "num_segments": 3,
     "segment_diffs": [
@@ -35,7 +35,7 @@
   },
   "maze_ms128_ss1002_na32": {
     "scenario_id": "maze_ms128_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms128_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms128_ss1002_na32.npz",
     "num_steps": 48,
     "num_segments": 3,
     "segment_diffs": [
@@ -52,7 +52,7 @@
   },
   "maze_ms128_ss1002_na48": {
     "scenario_id": "maze_ms128_ss1002_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms128_ss1002_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms128_ss1002_na48.npz",
     "num_steps": 66,
     "num_segments": 4,
     "segment_diffs": [
@@ -70,7 +70,7 @@
   },
   "maze_ms129_ss1001_na48": {
     "scenario_id": "maze_ms129_ss1001_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms129_ss1001_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms129_ss1001_na48.npz",
     "num_steps": 74,
     "num_segments": 4,
     "segment_diffs": [
@@ -88,7 +88,7 @@
   },
   "maze_ms129_ss1002_na48": {
     "scenario_id": "maze_ms129_ss1002_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms129_ss1002_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms129_ss1002_na48.npz",
     "num_steps": 48,
     "num_segments": 3,
     "segment_diffs": [
@@ -105,7 +105,7 @@
   },
   "maze_ms130_ss1000_na48": {
     "scenario_id": "maze_ms130_ss1000_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms130_ss1000_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms130_ss1000_na48.npz",
     "num_steps": 43,
     "num_segments": 2,
     "segment_diffs": [
@@ -121,7 +121,7 @@
   },
   "maze_ms130_ss1001_na16": {
     "scenario_id": "maze_ms130_ss1001_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms130_ss1001_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms130_ss1001_na16.npz",
     "num_steps": 37,
     "num_segments": 2,
     "segment_diffs": [
@@ -137,7 +137,7 @@
   },
   "maze_ms130_ss1001_na32": {
     "scenario_id": "maze_ms130_ss1001_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms130_ss1001_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms130_ss1001_na32.npz",
     "num_steps": 41,
     "num_segments": 2,
     "segment_diffs": [
@@ -153,7 +153,7 @@
   },
   "maze_ms130_ss1002_na48": {
     "scenario_id": "maze_ms130_ss1002_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms130_ss1002_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms130_ss1002_na48.npz",
     "num_steps": 41,
     "num_segments": 2,
     "segment_diffs": [
@@ -169,7 +169,7 @@
   },
   "maze_ms131_ss1000_na32": {
     "scenario_id": "maze_ms131_ss1000_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms131_ss1000_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms131_ss1000_na32.npz",
     "num_steps": 55,
     "num_segments": 3,
     "segment_diffs": [
@@ -186,7 +186,7 @@
   },
   "maze_ms131_ss1000_na48": {
     "scenario_id": "maze_ms131_ss1000_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms131_ss1000_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms131_ss1000_na48.npz",
     "num_steps": 206,
     "num_segments": 12,
     "segment_diffs": [
@@ -212,7 +212,7 @@
   },
   "maze_ms131_ss1002_na32": {
     "scenario_id": "maze_ms131_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms131_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms131_ss1002_na32.npz",
     "num_steps": 50,
     "num_segments": 3,
     "segment_diffs": [
@@ -229,7 +229,7 @@
   },
   "maze_ms132_ss1001_na32": {
     "scenario_id": "maze_ms132_ss1001_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms132_ss1001_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms132_ss1001_na32.npz",
     "num_steps": 51,
     "num_segments": 3,
     "segment_diffs": [
@@ -246,7 +246,7 @@
   },
   "maze_ms133_ss1000_na16": {
     "scenario_id": "maze_ms133_ss1000_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms133_ss1000_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms133_ss1000_na16.npz",
     "num_steps": 48,
     "num_segments": 3,
     "segment_diffs": [
@@ -263,7 +263,7 @@
   },
   "maze_ms133_ss1000_na32": {
     "scenario_id": "maze_ms133_ss1000_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms133_ss1000_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms133_ss1000_na32.npz",
     "num_steps": 75,
     "num_segments": 4,
     "segment_diffs": [
@@ -281,7 +281,7 @@
   },
   "maze_ms133_ss1001_na16": {
     "scenario_id": "maze_ms133_ss1001_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms133_ss1001_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms133_ss1001_na16.npz",
     "num_steps": 36,
     "num_segments": 2,
     "segment_diffs": [
@@ -297,7 +297,7 @@
   },
   "maze_ms133_ss1001_na48": {
     "scenario_id": "maze_ms133_ss1001_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms133_ss1001_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms133_ss1001_na48.npz",
     "num_steps": 216,
     "num_segments": 13,
     "segment_diffs": [
@@ -324,7 +324,7 @@
   },
   "maze_ms133_ss1002_na32": {
     "scenario_id": "maze_ms133_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms133_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms133_ss1002_na32.npz",
     "num_steps": 94,
     "num_segments": 5,
     "segment_diffs": [
@@ -343,7 +343,7 @@
   },
   "maze_ms134_ss1000_na16": {
     "scenario_id": "maze_ms134_ss1000_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms134_ss1000_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms134_ss1000_na16.npz",
     "num_steps": 38,
     "num_segments": 2,
     "segment_diffs": [
@@ -359,7 +359,7 @@
   },
   "maze_ms134_ss1000_na32": {
     "scenario_id": "maze_ms134_ss1000_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms134_ss1000_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms134_ss1000_na32.npz",
     "num_steps": 243,
     "num_segments": 15,
     "segment_diffs": [
@@ -388,7 +388,7 @@
   },
   "maze_ms134_ss1001_na48": {
     "scenario_id": "maze_ms134_ss1001_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms134_ss1001_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms134_ss1001_na48.npz",
     "num_steps": 101,
     "num_segments": 6,
     "segment_diffs": [
@@ -408,7 +408,7 @@
   },
   "maze_ms134_ss1002_na16": {
     "scenario_id": "maze_ms134_ss1002_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms134_ss1002_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms134_ss1002_na16.npz",
     "num_steps": 34,
     "num_segments": 2,
     "segment_diffs": [
@@ -424,7 +424,7 @@
   },
   "maze_ms134_ss1002_na48": {
     "scenario_id": "maze_ms134_ss1002_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms134_ss1002_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms134_ss1002_na48.npz",
     "num_steps": 115,
     "num_segments": 7,
     "segment_diffs": [
@@ -445,7 +445,7 @@
   },
   "maze_ms135_ss1001_na16": {
     "scenario_id": "maze_ms135_ss1001_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms135_ss1001_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms135_ss1001_na16.npz",
     "num_steps": 53,
     "num_segments": 3,
     "segment_diffs": [
@@ -462,7 +462,7 @@
   },
   "maze_ms135_ss1002_na32": {
     "scenario_id": "maze_ms135_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms135_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms135_ss1002_na32.npz",
     "num_steps": 78,
     "num_segments": 4,
     "segment_diffs": [
@@ -480,7 +480,7 @@
   },
   "maze_ms136_ss1000_na32": {
     "scenario_id": "maze_ms136_ss1000_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms136_ss1000_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms136_ss1000_na32.npz",
     "num_steps": 36,
     "num_segments": 2,
     "segment_diffs": [
@@ -496,7 +496,7 @@
   },
   "maze_ms136_ss1000_na48": {
     "scenario_id": "maze_ms136_ss1000_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms136_ss1000_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms136_ss1000_na48.npz",
     "num_steps": 42,
     "num_segments": 2,
     "segment_diffs": [
@@ -512,7 +512,7 @@
   },
   "maze_ms137_ss1000_na32": {
     "scenario_id": "maze_ms137_ss1000_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms137_ss1000_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms137_ss1000_na32.npz",
     "num_steps": 44,
     "num_segments": 2,
     "segment_diffs": [
@@ -528,7 +528,7 @@
   },
   "maze_ms137_ss1000_na48": {
     "scenario_id": "maze_ms137_ss1000_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms137_ss1000_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms137_ss1000_na48.npz",
     "num_steps": 54,
     "num_segments": 3,
     "segment_diffs": [
@@ -545,7 +545,7 @@
   },
   "maze_ms137_ss1001_na48": {
     "scenario_id": "maze_ms137_ss1001_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms137_ss1001_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms137_ss1001_na48.npz",
     "num_steps": 36,
     "num_segments": 2,
     "segment_diffs": [
@@ -561,7 +561,7 @@
   },
   "maze_ms137_ss1002_na32": {
     "scenario_id": "maze_ms137_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms137_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms137_ss1002_na32.npz",
     "num_steps": 39,
     "num_segments": 2,
     "segment_diffs": [
@@ -577,7 +577,7 @@
   },
   "maze_ms137_ss1002_na48": {
     "scenario_id": "maze_ms137_ss1002_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms137_ss1002_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms137_ss1002_na48.npz",
     "num_steps": 43,
     "num_segments": 2,
     "segment_diffs": [
@@ -593,7 +593,7 @@
   },
   "maze_ms138_ss1002_na16": {
     "scenario_id": "maze_ms138_ss1002_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms138_ss1002_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms138_ss1002_na16.npz",
     "num_steps": 37,
     "num_segments": 2,
     "segment_diffs": [
@@ -609,7 +609,7 @@
   },
   "maze_ms138_ss1002_na32": {
     "scenario_id": "maze_ms138_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms138_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms138_ss1002_na32.npz",
     "num_steps": 62,
     "num_segments": 3,
     "segment_diffs": [
@@ -626,7 +626,7 @@
   },
   "maze_ms139_ss1000_na16": {
     "scenario_id": "maze_ms139_ss1000_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms139_ss1000_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms139_ss1000_na16.npz",
     "num_steps": 39,
     "num_segments": 2,
     "segment_diffs": [
@@ -642,7 +642,7 @@
   },
   "maze_ms139_ss1001_na16": {
     "scenario_id": "maze_ms139_ss1001_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms139_ss1001_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms139_ss1001_na16.npz",
     "num_steps": 40,
     "num_segments": 2,
     "segment_diffs": [
@@ -658,7 +658,7 @@
   },
   "maze_ms139_ss1002_na32": {
     "scenario_id": "maze_ms139_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms139_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms139_ss1002_na32.npz",
     "num_steps": 56,
     "num_segments": 3,
     "segment_diffs": [
@@ -675,7 +675,7 @@
   },
   "maze_ms139_ss1002_na48": {
     "scenario_id": "maze_ms139_ss1002_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms139_ss1002_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms139_ss1002_na48.npz",
     "num_steps": 70,
     "num_segments": 4,
     "segment_diffs": [
@@ -693,7 +693,7 @@
   },
   "maze_ms140_ss1000_na32": {
     "scenario_id": "maze_ms140_ss1000_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms140_ss1000_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms140_ss1000_na32.npz",
     "num_steps": 81,
     "num_segments": 5,
     "segment_diffs": [
@@ -712,7 +712,7 @@
   },
   "maze_ms140_ss1001_na16": {
     "scenario_id": "maze_ms140_ss1001_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms140_ss1001_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms140_ss1001_na16.npz",
     "num_steps": 61,
     "num_segments": 3,
     "segment_diffs": [
@@ -729,7 +729,7 @@
   },
   "maze_ms140_ss1001_na32": {
     "scenario_id": "maze_ms140_ss1001_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms140_ss1001_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms140_ss1001_na32.npz",
     "num_steps": 69,
     "num_segments": 4,
     "segment_diffs": [
@@ -747,7 +747,7 @@
   },
   "maze_ms140_ss1001_na48": {
     "scenario_id": "maze_ms140_ss1001_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms140_ss1001_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms140_ss1001_na48.npz",
     "num_steps": 97,
     "num_segments": 6,
     "segment_diffs": [
@@ -767,7 +767,7 @@
   },
   "maze_ms141_ss1000_na16": {
     "scenario_id": "maze_ms141_ss1000_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms141_ss1000_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms141_ss1000_na16.npz",
     "num_steps": 40,
     "num_segments": 2,
     "segment_diffs": [
@@ -783,7 +783,7 @@
   },
   "maze_ms141_ss1000_na48": {
     "scenario_id": "maze_ms141_ss1000_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms141_ss1000_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms141_ss1000_na48.npz",
     "num_steps": 96,
     "num_segments": 6,
     "segment_diffs": [
@@ -803,7 +803,7 @@
   },
   "maze_ms141_ss1001_na16": {
     "scenario_id": "maze_ms141_ss1001_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms141_ss1001_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms141_ss1001_na16.npz",
     "num_steps": 42,
     "num_segments": 2,
     "segment_diffs": [
@@ -819,7 +819,7 @@
   },
   "maze_ms141_ss1001_na32": {
     "scenario_id": "maze_ms141_ss1001_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms141_ss1001_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms141_ss1001_na32.npz",
     "num_steps": 69,
     "num_segments": 4,
     "segment_diffs": [
@@ -837,7 +837,7 @@
   },
   "maze_ms141_ss1001_na48": {
     "scenario_id": "maze_ms141_ss1001_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms141_ss1001_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms141_ss1001_na48.npz",
     "num_steps": 103,
     "num_segments": 6,
     "segment_diffs": [
@@ -857,7 +857,7 @@
   },
   "maze_ms141_ss1002_na32": {
     "scenario_id": "maze_ms141_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms141_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms141_ss1002_na32.npz",
     "num_steps": 95,
     "num_segments": 5,
     "segment_diffs": [
@@ -876,7 +876,7 @@
   },
   "maze_ms142_ss1000_na32": {
     "scenario_id": "maze_ms142_ss1000_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms142_ss1000_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms142_ss1000_na32.npz",
     "num_steps": 33,
     "num_segments": 2,
     "segment_diffs": [
@@ -892,7 +892,7 @@
   },
   "maze_ms142_ss1000_na48": {
     "scenario_id": "maze_ms142_ss1000_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms142_ss1000_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms142_ss1000_na48.npz",
     "num_steps": 36,
     "num_segments": 2,
     "segment_diffs": [
@@ -908,7 +908,7 @@
   },
   "maze_ms142_ss1001_na48": {
     "scenario_id": "maze_ms142_ss1001_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms142_ss1001_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms142_ss1001_na48.npz",
     "num_steps": 34,
     "num_segments": 2,
     "segment_diffs": [
@@ -924,7 +924,7 @@
   },
   "maze_ms142_ss1002_na16": {
     "scenario_id": "maze_ms142_ss1002_na16",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms142_ss1002_na16.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms142_ss1002_na16.npz",
     "num_steps": 32,
     "num_segments": 2,
     "segment_diffs": [
@@ -940,7 +940,7 @@
   },
   "maze_ms142_ss1002_na32": {
     "scenario_id": "maze_ms142_ss1002_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms142_ss1002_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms142_ss1002_na32.npz",
     "num_steps": 32,
     "num_segments": 2,
     "segment_diffs": [
@@ -956,7 +956,7 @@
   },
   "maze_ms142_ss1002_na48": {
     "scenario_id": "maze_ms142_ss1002_na48",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms142_ss1002_na48.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms142_ss1002_na48.npz",
     "num_steps": 39,
     "num_segments": 2,
     "segment_diffs": [
@@ -972,7 +972,7 @@
   },
   "maze_ms143_ss1000_na32": {
     "scenario_id": "maze_ms143_ss1000_na32",
-    "npz_path": "dataset/held_out/filtered_npzs/maze_ms143_ss1000_na32.npz",
+    "npz_path": "dataset/held_out/ckpt_30000/maze_ms143_ss1000_na32.npz",
     "num_steps": 64,
     "num_segments": 4,
     "segment_diffs": [

@@ -2,12 +2,11 @@
 import argparse
 import json
 import math
+import tempfile
 from itertools import combinations
 from pathlib import Path
 
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 
 
 EPS = 1e-8
@@ -21,6 +20,32 @@ def sigmoid(x):
 def binary_entropy(p):
     p = np.clip(p, EPS, 1.0 - EPS)
     return -(p * np.log(p) + (1.0 - p) * np.log(1.0 - p))
+
+
+def collect_npz_files(input_folder, manifest, recursive):
+    """Return the list of .npz paths to consider, sourced from either a manifest
+    file (one path per line) or a folder walk. Exactly one source must be given."""
+    if (input_folder is None) == (manifest is None):
+        raise ValueError("Provide exactly one of input_folder or --manifest.")
+
+    if manifest is not None:
+        manifest = Path(manifest)
+        if not manifest.exists():
+            raise FileNotFoundError(f"Manifest file does not exist: {manifest}")
+        paths = []
+        for raw in manifest.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            paths.append(Path(line))
+        return paths
+
+    input_folder = Path(input_folder)
+    if not input_folder.exists():
+        raise FileNotFoundError(f"Input folder does not exist: {input_folder}")
+    return sorted(
+        input_folder.rglob("*.npz") if recursive else input_folder.glob("*.npz")
+    )
 
 
 def load_existing_annotations(output_path):
@@ -380,12 +405,15 @@ def load_episode_for_pool(npz_path):
     }
 
 
-def gather_pool_candidates(episodes, model, prior_annotations):
+def gather_pool_candidates(episodes, model, prior_annotations, random_mode=False, rng=None):
     """Score every pair across every episode against globally-normalized features.
 
-    Returns a list of dicts, sorted by eig_proxy descending. Pairs already
-    present in prior_annotations are excluded.
+    Returns a list of dicts. By default, sorted by eig_proxy descending (active
+    learning). If `random_mode=True`, the list is shuffled instead — used as
+    the random-sampling baseline that shares everything with AL except the
+    selection criterion. Pairs already present in prior_annotations are excluded.
     """
+    import random as _random
     if not episodes:
         return []
 
@@ -425,7 +453,10 @@ def gather_pool_candidates(episodes, model, prior_annotations):
                 "eig_proxy": eig_proxy,
             })
 
-    candidates.sort(key=lambda c: c["eig_proxy"], reverse=True)
+    if random_mode:
+        (rng or _random).shuffle(candidates)
+    else:
+        candidates.sort(key=lambda c: c["eig_proxy"], reverse=True)
     return candidates
 
 
@@ -484,164 +515,122 @@ def choose_best_pair(features, scores):
 
 
 # Visualization
+# ------------
+# Each labelling step renders the two segments as animated SVGs (via pogema's
+# AnimationDrawer) and embeds them side-by-side in a tiny HTML page. The browser
+# tab is opened once per session and rewritten between pairs — refresh to see
+# the next pair. Heavy pogema/cppimport deps are imported lazily so query.py's
+# top-level still loads in environments that only need the static-feature path.
 
-def draw_segment(ax, positions, goals, obstacles, segment_range, title, agent_colors):
-    H, W = obstacles.shape
+_HTML_PATH = Path(tempfile.gettempdir()) / "query_current.html"
+_SVG_DIR = _HTML_PATH.parent
+_BROWSER_OPENED = False
+
+
+def _render_segment_svg(npz_path, segment_range, output_path):
+    """Slice positions to segment_range and emit an animated SVG to output_path."""
+    import cppimport.import_hook  # noqa: F401  required for pogema's compiled bits
+    from pogema.wrappers.persistence import AgentState
+    from finetuning.scenario_generators import (
+        make_pogema_maze_instance,
+        make_pogema_random_instance,
+    )
+    from utils.svg_utils import create_multi_animation
+
+    data = np.load(str(npz_path), allow_pickle=True)
+    positions = data["positions"]
+    goals = data["goals"]
+    obstacles = data["obstacles"]
+    map_type = str(data["map_type"])
+    map_seed = int(data["map_seed"])
+    scenario_seed = int(data["scenario_seed"])
+    num_agents = int(data["num_agents"])
+
+    make_env = make_pogema_maze_instance if map_type == "maze" else make_pogema_random_instance
+    env = make_env(num_agents=num_agents, map_seed=map_seed, scenario_seed=scenario_seed)
+    grid_config = env.grid_config
+    wr = grid_config.obs_radius - 1
+
     start, end = segment_range
+    T_seg = end - start + 1
+    N = positions.shape[1]
 
-    ax.set_facecolor("#f7f7f7")
+    history = []
+    for n in range(N):
+        goal_r, goal_c = int(goals[n][0]) - wr, int(goals[n][1]) - wr
+        states = []
+        for t_seg in range(T_seg):
+            t_abs = start + t_seg
+            r, c = int(positions[t_abs][n][0]) - wr, int(positions[t_abs][n][1]) - wr
+            states.append(AgentState(x=r, y=c, tx=goal_r, ty=goal_c, step=t_seg, active=True))
+        history.append(states)
 
-    # Grid
-    for r in range(H):
-        for c in range(W):
-            color = "#2f2f2f" if obstacles[r, c] else "#ffffff"
-            rect = patches.Rectangle(
-                (c, r),
-                1,
-                1,
-                facecolor=color,
-                edgecolor="#d0d0d0",
-                linewidth=0.5,
-            )
-            ax.add_patch(rect)
-
-    # Goals
-    for i, (gr, gc) in enumerate(goals):
-        color = agent_colors[i % len(agent_colors)]
-
-        goal = patches.Rectangle(
-            (gc + 0.18, gr + 0.18),
-            0.64,
-            0.64,
-            facecolor="none",
-            edgecolor=color,
-            linewidth=2.0,
-            linestyle="--",
-        )
-        ax.add_patch(goal)
-
-        ax.text(
-            gc + 0.5,
-            gr + 0.5,
-            str(i),
-            ha="center",
-            va="center",
-            fontsize=7,
-            color=color,
-            weight="bold",
-        )
-
-    # Trajectories over the segment
-    segment_positions = positions[start:end + 1]
-
-    for i in range(positions.shape[1]):
-        color = agent_colors[i % len(agent_colors)]
-
-        xs = segment_positions[:, i, 1] + 0.5
-        ys = segment_positions[:, i, 0] + 0.5
-
-        ax.plot(xs, ys, linewidth=1.5, alpha=0.7, color=color)
-
-        # Start marker
-        ax.scatter(
-            xs[0],
-            ys[0],
-            s=45,
-            marker="o",
-            color=color,
-            edgecolor="black",
-            linewidth=0.7,
-            zorder=3,
-        )
-
-        # End marker
-        ax.scatter(
-            xs[-1],
-            ys[-1],
-            s=70,
-            marker="s",
-            color=color,
-            edgecolor="black",
-            linewidth=0.7,
-            zorder=4,
-        )
-
-        ax.text(
-            xs[-1],
-            ys[-1],
-            str(i),
-            ha="center",
-            va="center",
-            fontsize=7,
-            color="white",
-            weight="bold",
-            zorder=5,
-        )
-
-    ax.set_title(title, fontsize=11, weight="bold", pad=10)
-    ax.set_xlim(0, W)
-    ax.set_ylim(H, 0)
-    ax.set_aspect("equal")
-
-    ax.set_xticks(np.arange(0, W + 1, 1))
-    ax.set_yticks(np.arange(0, H + 1, 1))
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
-    ax.tick_params(length=0)
-
-    for spine in ax.spines.values():
-        spine.set_visible(False)
+    create_multi_animation(obstacles, [history], grid_config, name=str(output_path))
 
 
 def show_pair(npz_path, positions, goals, obstacles, segment_ranges, segment_diffs, pair_info):
+    """Render segment A and B to animated SVGs and embed both in a side-by-side
+    HTML page. Browser opens once per session at _HTML_PATH; subsequent calls
+    overwrite the file in place — refresh the tab to advance.
+
+    Signature kept compatible with the prior matplotlib version. positions,
+    goals, obstacles aren't used directly (the SVG renderer re-opens the npz
+    to get pogema env metadata) but are accepted for backwards compatibility.
+    """
+    global _BROWSER_OPENED
+
     a = pair_info["segment_a"]
     b = pair_info["segment_b"]
-
-    num_agents = positions.shape[1]
-    agent_colors = plt.cm.tab20(np.linspace(0, 1, max(num_agents, 1)))
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
-
     a_start, a_end = segment_ranges[a]
     b_start, b_end = segment_ranges[b]
-
     a_diff = int(segment_diffs[a]) if segment_diffs is not None else None
     b_diff = int(segment_diffs[b]) if segment_diffs is not None else None
 
-    draw_segment(
-        axes[0],
-        positions,
-        goals,
-        obstacles,
-        segment_ranges[a],
-        title=f"A: segment {a} | t={a_start}-{a_end} | diff={a_diff}",
-        agent_colors=agent_colors,
-    )
+    svg_a = _SVG_DIR / "query_segment_a.svg"
+    svg_b = _SVG_DIR / "query_segment_b.svg"
+    _render_segment_svg(npz_path, segment_ranges[a], svg_a)
+    _render_segment_svg(npz_path, segment_ranges[b], svg_b)
 
-    draw_segment(
-        axes[1],
-        positions,
-        goals,
-        obstacles,
-        segment_ranges[b],
-        title=f"B: segment {b} | t={b_start}-{b_end} | diff={b_diff}",
-        agent_colors=agent_colors,
-    )
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>query — {Path(npz_path).name}</title>
+<style>
+body {{ font-family: -apple-system, system-ui, sans-serif; background: #f5f5f5; margin: 16px; }}
+.summary {{ background: white; padding: 12px 16px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }}
+.summary code {{ background: #eee; padding: 1px 5px; border-radius: 3px; font-size: 12px; }}
+.row {{ display: flex; gap: 16px; }}
+.col {{ flex: 1; background: white; padding: 12px; border-radius: 6px; }}
+h2 {{ margin: 0 0 8px; font-size: 14px; font-weight: 600; }}
+object {{ width: 100%; height: auto; display: block; }}
+.hint {{ color: #888; font-style: italic; margin-top: 4px; }}
+</style></head><body>
+<div class="summary">
+  <b>{Path(npz_path).name}</b> &middot;
+  EIG proxy <b>{pair_info['eig_proxy']:.4f}</b> &middot;
+  p(A worse) <b>{pair_info['preference_probability_a_worse']:.3f}</b> &middot;
+  H(p) <b>{pair_info['entropy']:.3f}</b> &middot;
+  ‖φ_A − φ_B‖ <b>{pair_info['feature_distance']:.3f}</b>
+  <div class="hint">watch both, then return to the terminal and press <code>a</code> / <code>b</code> / <code>u</code> / <code>s</code> / <code>q</code></div>
+</div>
+<div class="row">
+  <div class="col">
+    <h2>Segment A — t={a_start}-{a_end} &middot; diff={a_diff}</h2>
+    <object type="image/svg+xml" data="{svg_a.name}"></object>
+  </div>
+  <div class="col">
+    <h2>Segment B — t={b_start}-{b_end} &middot; diff={b_diff}</h2>
+    <object type="image/svg+xml" data="{svg_b.name}"></object>
+  </div>
+</div>
+</body></html>"""
+    _HTML_PATH.write_text(html)
 
-    fig.suptitle(
-        (
-            f"{Path(npz_path).name}\n"
-            f"EIG proxy={pair_info['eig_proxy']:.4f}, "
-            f"p(A worse)={pair_info['preference_probability_a_worse']:.3f}, "
-            f"H(p)={pair_info['entropy']:.3f}, "
-            f"feature distance={pair_info['feature_distance']:.3f}"
-        ),
-        fontsize=12,
-        weight="bold",
-    )
-
-    plt.tight_layout()
-    plt.show()
+    if not _BROWSER_OPENED:
+        import webbrowser
+        webbrowser.open(f"file://{_HTML_PATH.resolve()}")
+        print(f"  (browser opened at {_HTML_PATH}; refresh between pairs)")
+        _BROWSER_OPENED = True
+    else:
+        print(f"  (refresh {_HTML_PATH} to see this pair)")
 
 
 # Interactive query loop
@@ -781,19 +770,14 @@ def run_query_loop(
     model_path=None,
     recursive=False,
     skip_already_labeled=True,
+    manifest=None,
 ):
-    input_folder = Path(input_folder)
     output_path = Path(output_path)
-
-    if not input_folder.exists():
-        raise FileNotFoundError(f"Input folder does not exist: {input_folder}")
-
-    npz_files = sorted(
-        input_folder.rglob("*.npz") if recursive else input_folder.glob("*.npz")
-    )
+    npz_files = collect_npz_files(input_folder, manifest, recursive)
 
     if not npz_files:
-        print(f"No .npz files found in {input_folder}")
+        src = manifest if manifest is not None else input_folder
+        print(f"No .npz files found via {src}")
         return
 
     model = load_torch_model(model_path)
@@ -837,25 +821,31 @@ def run_pool_query_loop(
     budget,
     per_episode_cap,
     recursive=False,
+    manifest=None,
+    random_mode=False,
+    seed=None,
 ):
-    """Pool-based selection: rank every (episode, segA, segB) candidate against
+    """Pool-based selection over (episode, segA, segB) candidates.
+
+    Default (active learning): rank candidates by H(p)*||phi_A-phi_B|| against
     globally-normalized features, greedy-pick the top `budget` respecting
     `per_episode_cap`, then walk the human through the picked pairs.
+
+    `random_mode=True`: shuffle the candidate pool instead of ranking — used as
+    the random-sampling baseline (Stage 2 in the unified comparison). Same
+    one-pair-at-a-time labelling protocol; only the selection criterion changes.
+    `seed` makes the random choice reproducible across re-runs.
 
     Resumable: prior annotations in `output_path` exclude their exact pair from
     the pool and count toward each episode's cap.
     """
-    input_folder = Path(input_folder)
+    import random as _random
+    rng = _random.Random(seed) if seed is not None else None
     output_path = Path(output_path)
-
-    if not input_folder.exists():
-        raise FileNotFoundError(f"Input folder does not exist: {input_folder}")
-
-    npz_files = sorted(
-        input_folder.rglob("*.npz") if recursive else input_folder.glob("*.npz")
-    )
+    npz_files = collect_npz_files(input_folder, manifest, recursive)
     if not npz_files:
-        print(f"No .npz files found in {input_folder}")
+        src = manifest if manifest is not None else input_folder
+        print(f"No .npz files found via {src}")
         return
 
     model = load_torch_model(model_path)
@@ -896,8 +886,11 @@ def run_pool_query_loop(
 
     feature_names = episodes[0]["feature_names"]
 
-    print("Ranking candidate pairs...")
-    candidates = gather_pool_candidates(episodes, model, prior_annotations)
+    print("Sampling candidate pairs..." if random_mode else "Ranking candidate pairs...")
+    candidates = gather_pool_candidates(
+        episodes, model, prior_annotations,
+        random_mode=random_mode, rng=rng,
+    )
     print(f"  {len(candidates)} candidate pairs")
 
     selected = select_pool_with_cap(candidates, remaining_budget, per_episode_cap, prior_counts)
@@ -940,7 +933,19 @@ def main():
 
     parser.add_argument(
         "input_folder",
-        help="Folder containing .npz files.",
+        nargs="?",
+        default=None,
+        help="Folder containing .npz files. Mutually exclusive with --manifest.",
+    )
+
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help="Path to a manifest file (one .npz path per line; blank lines and "
+             "lines starting with '#' are ignored). Used in place of input_folder "
+             "to define the elicitation pool — useful for restricting Stage 3/4 "
+             "to a curated 'filtered' subset of ckpt_*/ rollouts without "
+             "physically copying files into a separate directory.",
     )
 
     parser.add_argument(
@@ -988,9 +993,35 @@ def main():
              "concentration risk.",
     )
 
+    parser.add_argument(
+        "--random",
+        action="store_true",
+        help="Pool mode: skip the H(p)*||phi_A-phi_B|| acquisition and "
+             "uniformly sample candidates instead. Same one-pair-at-a-time "
+             "labelling protocol — used as the random-sampling baseline "
+             "against which AL acquisition is judged. Requires --budget.",
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for --random mode (makes the sampled subset "
+             "reproducible across re-runs).",
+    )
+
     args = parser.parse_args()
 
-    if args.budget is not None or args.per_episode_cap is not None:
+    if args.input_folder is None and args.manifest is None:
+        parser.error("must provide either input_folder or --manifest")
+    if args.random and args.budget is None:
+        parser.error("--random requires --budget (random sampling without a "
+                     "budget would label every candidate pair).")
+
+    in_pool_mode = (
+        args.budget is not None or args.per_episode_cap is not None or args.random
+    )
+    if in_pool_mode:
         run_pool_query_loop(
             input_folder=args.input_folder,
             output_path=args.output,
@@ -998,6 +1029,9 @@ def main():
             budget=args.budget,
             per_episode_cap=args.per_episode_cap,
             recursive=args.recursive,
+            manifest=args.manifest,
+            random_mode=args.random,
+            seed=args.seed,
         )
     else:
         run_query_loop(
@@ -1006,6 +1040,7 @@ def main():
             model_path=args.model_path,
             recursive=args.recursive,
             skip_already_labeled=not args.relabel,
+            manifest=args.manifest,
         )
 
 

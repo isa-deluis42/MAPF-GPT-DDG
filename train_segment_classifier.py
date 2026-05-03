@@ -50,22 +50,38 @@ DIFF_CONFIDENT_NEG = 1
 # Annotations
 # ---------------------------------------------------------------------------
 
-def load_annotations(path) -> Dict[str, List[Tuple[int, int]]]:
-    """Read annotations file → {scenario_id: [(worst_idx, clean_idx), ...]}.
+def _resolve_annotation_path(npz_path: Optional[str]) -> Optional[str]:
+    """Resolve a recorded npz_path to a stable absolute-path string.
 
-    Two formats are accepted, auto-detected by JSON shape:
+    Annotations record paths relative to the repo root (the cwd where labeling
+    was run). Resolving against the current cwd gives a stable string we can
+    string-compare against the trainer's resolved episode paths."""
+    if not npz_path:
+        return None
+    return str(Path(npz_path).resolve())
+
+
+def load_annotations(path) -> Dict[str, List[Tuple[int, int]]]:
+    """Read annotations file → {resolved_abs_npz_path: [(worst_idx, clean_idx), ...]}.
+
+    Two formats are accepted, auto-detected by JSON shape. Both record an
+    ``npz_path`` field per entry; that path (resolved to absolute) is the
+    override key. Same scenario_id labeled across different rollouts (e.g.
+    ``ckpt_500/<sid>.npz`` vs ``ckpt_1500/<sid>.npz``) coexist as separate
+    annotations.
 
       • Original (Stage 2): dict keyed by scenario_id, with keys
-        ``worst_congestion_failure_segment_index`` and ``clearly_clean_segment_index``.
-        Always produces a single-element list per scenario.
+        ``npz_path``, ``worst_congestion_failure_segment_index``,
+        ``clearly_clean_segment_index``. Always produces a single-element
+        list per path.
 
       • Elicitation (Stages 3–4, produced by query.py): list of per-pair
-        entries with ``segment_a``, ``segment_b``, ``chosen_worse_segment``,
-        and ``label``. Entries labelled ``unsure_or_skipped`` are dropped.
-        A scenario_id that appears in multiple labelled pairs (pool-mode AL
-        with --per-episode-cap > 1) accumulates all of them.
+        entries with ``npz_path``, ``segment_a``, ``segment_b``,
+        ``chosen_worse_segment``, ``label``. Entries labelled
+        ``unsure_or_skipped`` are dropped. Multiple labels for the same
+        rollout (pool-mode AL with --per-episode-cap > 1) accumulate.
 
-    Entries with missing indices or worst==clean are dropped.
+    Entries with missing indices, missing npz_path, or worst==clean are dropped.
     """
     with open(path) as f:
         raw = json.load(f)
@@ -74,26 +90,27 @@ def load_annotations(path) -> Dict[str, List[Tuple[int, int]]]:
 
     if isinstance(raw, list):
         for entry in raw:
-            sid = entry.get("scenario_id")
+            key = _resolve_annotation_path(entry.get("npz_path"))
             chosen = entry.get("chosen_worse_segment")
             a = entry.get("segment_a")
             b = entry.get("segment_b")
-            if sid is None or chosen is None or a is None or b is None:
+            if key is None or chosen is None or a is None or b is None:
                 continue
             a, b, chosen = int(a), int(b), int(chosen)
             if a == b or chosen not in (a, b):
                 continue
             worst = chosen
             clean = b if chosen == a else a
-            out.setdefault(sid, []).append((worst, clean))
+            out.setdefault(key, []).append((worst, clean))
         return out
 
-    for sid, entry in raw.items():
+    for _sid, entry in raw.items():
+        key = _resolve_annotation_path(entry.get("npz_path"))
         wi = entry.get("worst_congestion_failure_segment_index")
         ci = entry.get("clearly_clean_segment_index")
-        if wi is None or ci is None or int(wi) == int(ci):
+        if key is None or wi is None or ci is None or int(wi) == int(ci):
             continue
-        out[sid] = [(int(wi), int(ci))]
+        out.setdefault(key, []).append((int(wi), int(ci)))
     return out
 
 
@@ -109,20 +126,9 @@ def split_annotations(
     return train, val
 
 
-def is_annotated_npz(path: Path) -> bool:
-    """True iff `path` lives in filtered_npzs/annotated/ — where the actual
-    annotated rollouts were moved during the labeling pass.
-    These are the only files that the human verdict applies to (other ckpt_*/
-    files with the same scenario_id are *different rollouts* of the same scenario)."""
-    return "annotated" in path.parts
-
-
-def annotation_path_for(scenario_id: str, episode_paths: List[Path]) -> Optional[Path]:
-    """Find the filtered_npzs/annotated/<scenario_id>.npz the human verdict applies to."""
-    for p in episode_paths:
-        if p.stem == scenario_id and is_annotated_npz(p):
-            return p
-    return None
+def resolve_path(path: Path) -> str:
+    """Resolve an episode path to the same canonical string used as the override key."""
+    return str(path.resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -222,12 +228,33 @@ def _augment(feat_a: np.ndarray, feat_b: np.ndarray):
 # Pair generation
 # ---------------------------------------------------------------------------
 
+def _diff_bucket(diff: int):
+    """Bucket a segment_diff for pair-generation purposes.
+
+    Returns None for diff == 0 because that value is *unreliable* — it usually
+    arises when LaCAM's makespan was identical at both segment boundaries
+    (both probes timed out hitting MAX_EPISODE_STEPS, OR both saw a trivial
+    residual problem because most agents had already reached goals). Either
+    way, diff=0 doesn't reflect "no congestion change" — it reflects "LaCAM
+    saw the same problem twice." We treat it as unknown and exclude such
+    segments from auto-pair generation entirely.
+    """
+    if diff == 0:
+        return None
+    if diff > DIFF_CONFIDENT_POS:
+        return "pos"
+    if diff < DIFF_CONFIDENT_NEG:
+        return "neg"
+    return "mid"
+
+
 def generate_pairs(segment_diffs: np.ndarray, context_segments: int = 1) -> List[Tuple[int, int, float]]:
     """
     Return (i, j, weight) pairs where segment i should score higher than j.
 
     The last (context_segments - 1) segments are excluded from training pairs
-    because their forward context is partially zero-padded.
+    because their forward context is partially zero-padded. Segments with
+    diff == 0 are also excluded — see _diff_bucket.
 
     Weights:
       confident_pos vs confident_neg  → 1.0
@@ -237,13 +264,15 @@ def generate_pairs(segment_diffs: np.ndarray, context_segments: int = 1) -> List
     pairs = []
     S = len(segment_diffs) - (context_segments - 1)
     for i in range(S):
+        bi = _diff_bucket(segment_diffs[i])
+        if bi is None:
+            continue
         for j in range(S):
             if i == j or segment_diffs[i] <= segment_diffs[j]:
                 continue
-            bi = "pos" if segment_diffs[i] > DIFF_CONFIDENT_POS else (
-                 "neg" if segment_diffs[i] < DIFF_CONFIDENT_NEG else "mid")
-            bj = "pos" if segment_diffs[j] > DIFF_CONFIDENT_POS else (
-                 "neg" if segment_diffs[j] < DIFF_CONFIDENT_NEG else "mid")
+            bj = _diff_bucket(segment_diffs[j])
+            if bj is None:
+                continue
             if bi == "pos" and bj == "neg":
                 w = 1.0
             elif (bi == "pos" and bj == "mid") or (bi == "mid" and bj == "neg"):
@@ -287,13 +316,16 @@ class SegmentPairDataset(Dataset):
                 "segment_diffs": data["segment_diffs"],
             })
 
-            # Option B: if this is an annotated rollout with human verdict(s),
-            # replace all auto-generated pairs from this episode with the human pair(s).
-            sid = path.stem
-            if is_annotated_npz(path) and sid in human_overrides:
+            # Option B: if this exact rollout has human verdict(s), replace its
+            # auto-generated pairs with the human pair(s). The override key is
+            # the resolved absolute path, so the same scenario_id labeled at
+            # different checkpoints (e.g. ckpt_500/X vs ckpt_1500/X) only
+            # overrides the rollout the human actually watched.
+            path_key = resolve_path(path)
+            if path_key in human_overrides:
                 S = len(data["segment_diffs"]) - (context_segments - 1)
                 added_any = False
-                for wi, ci in human_overrides[sid]:
+                for wi, ci in human_overrides[path_key]:
                     if 0 <= wi < S and 0 <= ci < S:
                         self.pairs.append((ep_idx, wi, ci, 1.0))
                         self.n_human_pairs += 1
@@ -361,19 +393,18 @@ class Segment3DCNN(nn.Module):
 @torch.no_grad()
 def evaluate_human_pairs(
     model: "Segment3DCNN",
-    episode_paths: List[Path],
     annotations: Dict[str, List[Tuple[int, int]]],
     device: str,
     context_segments: int = 1,
 ) -> Tuple[float, int]:
     """Pairwise accuracy: fraction of (worst, clean) pairs where score(worst) > score(clean).
-    Each episode contributes one entry per labeled pair (so episodes with multiple
-    pool-mode labels weigh more)."""
+    Each rollout contributes one entry per labeled pair (so rollouts with
+    multiple pool-mode labels weigh more)."""
     model.eval()
     correct = total = 0
-    for sid, pair_list in annotations.items():
-        path = annotation_path_for(sid, episode_paths)
-        if path is None:
+    for path_key, pair_list in annotations.items():
+        path = Path(path_key)
+        if not path.exists():
             continue
         data = np.load(str(path), allow_pickle=True)
         S = len(data["segment_diffs"]) - (context_segments - 1)
@@ -392,37 +423,36 @@ def evaluate_human_pairs(
 @torch.no_grad()
 def evaluate_human_worst_match(
     model: "Segment3DCNN",
-    episode_paths: List[Path],
     annotations: Dict[str, List[Tuple[int, int]]],
     device: str,
     context_segments: int = 1,
 ) -> Tuple[float, float, float, int]:
-    """For each annotated episode, score every segment and check how close
+    """For each annotated rollout, score every segment and check how close
     argmax(scores) is to the human's worst segment.
 
-    Returns (top1, top1_pm1, top3, n_episodes_evaluated).
+    Returns (top1, top1_pm1, top3, n_rollouts_evaluated).
       top1     — argmax(scores) == human worst
       top1_pm1 — |argmax(scores) - human worst| ≤ 1   (deployment-shape; mirrors the auto top-1±1)
       top3     — human worst ∈ top-3 by score
 
-    For pool-mode annotations (multiple pairs per episode), the per-episode
+    For pool-mode annotations (multiple pairs per rollout), the per-rollout
     "human worst" is the segment that appears most often as `worst` across
-    that episode's labeled pairs. Ties are broken by lowest index.
+    that rollout's labeled pairs. Ties are broken by lowest index.
     """
     from collections import Counter
 
     model.eval()
     t1 = pm1 = t3 = total = 0
-    for sid, pair_list in annotations.items():
-        path = annotation_path_for(sid, episode_paths)
-        if path is None:
+    for path_key, pair_list in annotations.items():
+        path = Path(path_key)
+        if not path.exists():
             continue
         data = np.load(str(path), allow_pickle=True)
         S = len(data["segment_diffs"]) - (context_segments - 1)
         if S < 2:
             continue
 
-        # Majority vote on worst (one prediction per episode).
+        # Majority vote on worst (one prediction per rollout).
         votes = Counter(w for w, _c in pair_list if 0 <= w < S)
         if not votes:
             continue
@@ -500,24 +530,33 @@ def main():
     parser.add_argument("--base_ch", type=int, default=16,
                         help="CNN base channel width; must be divisible by 4 (default: 16)")
     parser.add_argument("--annotations", type=str, default=None,
-                        help="Path to annotations.json. If set, enables Option-B human-label override "
-                             "during training and reports human-pair accuracy each epoch.")
-    parser.add_argument("--hold_out_every", type=int, default=4,
-                        help="Every Nth annotation (sorted by scenario_id) is held out from training. "
-                             "Default 4 → ~7/28 held out for val human-pair accuracy.")
+                        help="Path to a human annotations file with labels on TRAIN_MAP_SEEDS rollouts. "
+                             "If set, ALL labels are used as Option-B training overrides (no within-train "
+                             "holdout). Held-out human val signal comes from --val-annotations only.")
     parser.add_argument("--min_checkpoint", type=int, default=0,
                         help="Skip episodes from MAPF-GPT checkpoint_iter < this (default: 0 = use all)")
     parser.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine", "plateau"],
                         help="LR schedule: 'none' (constant), 'cosine' (CosineAnnealingLR), 'plateau' (ReduceLROnPlateau on top-1±1)")
+    parser.add_argument("--init-from", type=str, default=None,
+                        help="Path to a .pt checkpoint to initialize weights from before training. "
+                             "Used for warm-start fine-tuning across Stages 2/3/4 — initializes from "
+                             "Stage 1's baseline so human-label training fine-tunes the auto-trained "
+                             "backbone rather than training from scratch. Architecture (base_ch, "
+                             "context_segments, in_channels) must match the CLI args.")
+    parser.add_argument("--val-annotations", type=str, default=None,
+                        help="Path to a SECOND annotations file containing human labels on "
+                             "VAL_MAP_SEEDS rollouts (the held-out maps the trainer never sees). "
+                             "Eval-only — never used as training overrides. Adds a separate "
+                             "'val-map' human metric each epoch (pairwise + argmax accuracy) and "
+                             "saves a best-by-val-map-pairwise checkpoint as {stem}.val_map_human.pt.")
     args = parser.parse_args()
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
 
     episode_paths = list(Path(args.data).rglob("*.npz"))
-    n_annotated = sum(1 for p in episode_paths if is_annotated_npz(p))
-    print(f"Found {len(episode_paths)} episode files ({n_annotated} under filtered_npzs/annotated/)")
+    print(f"Found {len(episode_paths)} episode files under {args.data}")
 
-    # Apply min-checkpoint filter (only affects ckpt_*/ files; annotated/ and filtered_npzs/ are kept regardless).
+    # Apply min-checkpoint filter (only affects ckpt_*/ files; everything else is kept regardless).
     if args.min_checkpoint > 0:
         filtered = []
         for p in episode_paths:
@@ -529,25 +568,33 @@ def main():
                 except ValueError:
                     filtered.append(p)
             else:
-                # Keep filtered_npzs/ and annotated/ files (they don't carry a per-checkpoint tag in the path).
                 filtered.append(p)
         episode_paths = filtered
         print(f"Filtered to {len(episode_paths)} episodes (ckpt_*/ kept only if iter >= {args.min_checkpoint})")
 
-    # Load annotations for Stage-1 measurement and (optionally) Stage-2 training overrides.
-    all_annotations: Dict[str, Tuple[int, int]] = {}
-    train_annotations: Dict[str, Tuple[int, int]] = {}
-    val_annotations: Dict[str, Tuple[int, int]] = {}
+    # Train-map human annotations: all go into training overrides (no within-train holdout).
+    # Held-out human val signal comes from --val-annotations only (val-map rollouts).
+    # Annotation keys are resolved absolute npz paths; the override key matches a loaded
+    # rollout's resolved path.
+    train_annotations: Dict[str, List[Tuple[int, int]]] = {}
     if args.annotations:
-        all_annotations = load_annotations(args.annotations)
-        train_annotations, val_annotations = split_annotations(all_annotations, args.hold_out_every)
-        print(f"Annotations: {len(all_annotations)} total → {len(train_annotations)} train + {len(val_annotations)} val "
-              f"(hold_out_every={args.hold_out_every})")
+        train_annotations = load_annotations(args.annotations)
+        n_missing = sum(1 for k in train_annotations if not Path(k).exists())
+        print(f"Train-map annotations: {len(train_annotations)} rollouts "
+              f"({n_missing} not on disk; all used as training overrides)")
 
-    train_overrides = train_annotations if args.annotations else None
+    # Val-map human annotations: eval-only, never overrides. The actual human val signal.
+    val_map_annotations: Dict[str, List[Tuple[int, int]]] = {}
+    if args.val_annotations:
+        val_map_annotations = load_annotations(args.val_annotations)
+        n_missing_vm = sum(1 for k in val_map_annotations if not Path(k).exists())
+        print(f"Val-map annotations: {len(val_map_annotations)} rollouts "
+              f"({n_missing_vm} not on disk; eval-only)")
+
     train_dataset = SegmentPairDataset(
         episode_paths, TRAIN_MAP_SEEDS,
-        augment=True, context_segments=args.context_segments, human_overrides=train_overrides,
+        augment=True, context_segments=args.context_segments,
+        human_overrides=train_annotations or None,
     )
     val_dataset = SegmentPairDataset(
         episode_paths, VAL_MAP_SEEDS,
@@ -563,6 +610,25 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     model = Segment3DCNN(base_ch=args.base_ch).to(device)
+
+    if args.init_from:
+        ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
+        ckpt_base_ch = ckpt.get("base_ch")
+        ckpt_ctx = ckpt.get("context_segments", 1)
+        if ckpt_base_ch is not None and ckpt_base_ch != args.base_ch:
+            raise SystemExit(
+                f"--init-from architecture mismatch: ckpt base_ch={ckpt_base_ch} "
+                f"vs --base_ch {args.base_ch}"
+            )
+        if ckpt_ctx != args.context_segments:
+            raise SystemExit(
+                f"--init-from architecture mismatch: ckpt context_segments={ckpt_ctx} "
+                f"vs --context_segments {args.context_segments}"
+            )
+        model.load_state_dict(ckpt["state_dict"])
+        print(f"Initialized weights from {args.init_from} (base_ch={ckpt_base_ch}, "
+              f"ctx={ckpt_ctx}, save_by={ckpt.get('save_by')})")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     if args.scheduler == "cosine":
@@ -572,13 +638,13 @@ def main():
     else:
         scheduler = None
 
-    # We track four best-checkpoint criteria simultaneously and write up to four .pt files:
-    #   args.output                              — best human_val (pairwise vs clean), the original criterion
-    #   {stem}.argmax_pm1.pt                     — best DDG-aligned top-1±1 on val map seeds (lots of data, noisy auto-label)
-    #   {stem}.human_argmax.pt                   — best human-argmax±1 on val annotations (gold label, ±1 tolerance)
-    #   {stem}.human_argmax_top1.pt              — best human-argmax exact-match (gold label, strictest)
+    # We track up to four best-checkpoint criteria, written to up to four .pt files:
+    #   args.output                              — best human_val pairwise on val-map labels (the human val signal)
+    #   {stem}.argmax_pm1.pt                     — best DDG-aligned top-1±1 on val-map auto labels
+    #   {stem}.human_argmax.pt                   — best human-argmax±1 on val-map labels
+    #   {stem}.human_argmax_top1.pt              — best human-argmax exact-match on val-map labels
     #
-    # If --annotations isn't passed, only the argmax_pm1 checkpoint is written.
+    # If --val-annotations isn't passed, only argmax_pm1 is saved (no human val signal).
     primary_path = Path(args.output)
     pm1_path             = primary_path.with_name(primary_path.stem + ".argmax_pm1"        + primary_path.suffix)
     human_argmax_path    = primary_path.with_name(primary_path.stem + ".human_argmax"      + primary_path.suffix)
@@ -596,11 +662,12 @@ def main():
         }, str(path))
 
     train_losses, val_pm1s, val_top3s = [], [], []
-    hpair_alls, hpair_trains, hpair_vals = [], [], []
-    ha_t1_alls, ha_t1_trains, ha_t1_vals = [], [], []      # human-argmax exact-match trajectories
-    ha_pm1_alls, ha_pm1_trains, ha_pm1_vals = [], [], []   # human-argmax±1 trajectories
-    best_human_val = 0.0
+    # Train-side sanity (model should memorize the labels it trains on).
+    hpair_trains, ha_t1_trains, ha_pm1_trains = [], [], []
+    # Val-map (held-out maps + human labels) — the actual human val signal.
+    hpair_vals, ha_t1_vals, ha_pm1_vals = [], [], []
     best_pm1 = 0.0
+    best_human_val = 0.0
     best_human_argmax_pm1 = 0.0
     best_human_argmax_top1 = 0.0
 
@@ -630,35 +697,40 @@ def main():
         cur_lr = optimizer.param_groups[0]["lr"]
         msg = f"Epoch {epoch:3d} | lr {cur_lr:.2e} | loss {avg_loss:.4f} | top-1±1 {pm1:.3f} | top-3 {top3:.3f}"
 
-        # Human-aligned metrics — pairwise (existing) + argmax top-1 + argmax±1 over annotation subsets.
-        ha_t1_val = 0.0
-        ha_pm1_val = 0.0
-        if all_annotations:
-            hp_all, n_all = evaluate_human_pairs(model, episode_paths, all_annotations, device, args.context_segments)
-            hp_train, n_train = evaluate_human_pairs(model, episode_paths, train_annotations, device, args.context_segments)
-            hp_val, n_val = evaluate_human_pairs(model, episode_paths, val_annotations, device, args.context_segments)
-            hpair_alls.append(hp_all); hpair_trains.append(hp_train); hpair_vals.append(hp_val)
+        # Train-side sanity: pairwise + argmax accuracy on the rollouts we trained on.
+        # Should saturate near 1.0 once training converges; useful as a debug signal.
+        hp_train = ha_t1_train = ha_pm1_train = 0.0
+        if train_annotations:
+            hp_train, _ = evaluate_human_pairs(model, train_annotations, device, args.context_segments)
+            ha_t1_train, ha_pm1_train, _, _ = evaluate_human_worst_match(
+                model, train_annotations, device, args.context_segments,
+            )
+            hpair_trains.append(hp_train); ha_t1_trains.append(ha_t1_train); ha_pm1_trains.append(ha_pm1_train)
 
-            ha_t1_all,   ha_pm1_all,   _, _ = evaluate_human_worst_match(model, episode_paths, all_annotations,   device, args.context_segments)
-            ha_t1_train, ha_pm1_train, _, _ = evaluate_human_worst_match(model, episode_paths, train_annotations, device, args.context_segments)
-            ha_t1_val,   ha_pm1_val,   _, _ = evaluate_human_worst_match(model, episode_paths, val_annotations,   device, args.context_segments)
-            ha_t1_alls.append(ha_t1_all);   ha_t1_trains.append(ha_t1_train);   ha_t1_vals.append(ha_t1_val)
-            ha_pm1_alls.append(ha_pm1_all); ha_pm1_trains.append(ha_pm1_train); ha_pm1_vals.append(ha_pm1_val)
+        # Held-out human val (val-map rollouts + human labels). The actual generalization signal.
+        hp_val = ha_t1_val = ha_pm1_val = 0.0
+        if val_map_annotations:
+            hp_val, _ = evaluate_human_pairs(model, val_map_annotations, device, args.context_segments)
+            ha_t1_val, ha_pm1_val, _, _ = evaluate_human_worst_match(
+                model, val_map_annotations, device, args.context_segments,
+            )
+            hpair_vals.append(hp_val); ha_t1_vals.append(ha_t1_val); ha_pm1_vals.append(ha_pm1_val)
 
-            msg += (f" | hp all/tr/val {hp_all:.3f}/{hp_train:.3f}/{hp_val:.3f}"
-                    f" | h-arg top1 a/t/v {ha_t1_all:.3f}/{ha_t1_train:.3f}/{ha_t1_val:.3f}"
-                    f" | h-arg ±1 a/t/v {ha_pm1_all:.3f}/{ha_pm1_train:.3f}/{ha_pm1_val:.3f}")
+        if train_annotations or val_map_annotations:
+            msg += (f" | hp tr/val {hp_train:.3f}/{hp_val:.3f}"
+                    f" | h-arg t1 tr/val {ha_t1_train:.3f}/{ha_t1_val:.3f}"
+                    f" | h-arg ±1 tr/val {ha_pm1_train:.3f}/{ha_pm1_val:.3f}")
 
         print(msg)
 
-        # Always save best-pm1 checkpoint (no annotation dependency).
+        # Always save best-pm1 checkpoint (no annotation dependency — uses auto val).
         if pm1 > best_pm1:
             best_pm1 = pm1
             _save_ckpt(pm1_path, "argmax_pm1", best_pm1)
             print(f"  → saved {pm1_path.name} (best argmax_pm1: {best_pm1:.3f})")
 
-        # Save the three annotation-driven checkpoints when annotations are present.
-        if args.annotations and hpair_vals:
+        # Human-val-driven checkpoints: only fire when --val-annotations is set.
+        if val_map_annotations and hpair_vals:
             if hpair_vals[-1] > best_human_val:
                 best_human_val = hpair_vals[-1]
                 _save_ckpt(primary_path, "human_val", best_human_val)
@@ -674,35 +746,35 @@ def main():
 
     print(f"Training complete.")
     print(f"  best argmax_pm1 (DDG-aligned, val map seeds 144-147): {best_pm1:.3f}")
-    if args.annotations:
-        print(f"  best human_val (pairwise, 13 held-out annotations):    {best_human_val:.3f}")
-        print(f"  best human_argmax±1 (gold ±1, 13 held-out):             {best_human_argmax_pm1:.3f}  [random≈0.81]")
-        print(f"  best human_argmax top-1 (gold exact, 13 held-out):      {best_human_argmax_top1:.3f}  [random≈0.35]")
+    if val_map_annotations:
+        print(f"  best human_val (pairwise, val-map labels):           {best_human_val:.3f}  [random=0.5]")
+        print(f"  best human_argmax±1 (val-map):                        {best_human_argmax_pm1:.3f}")
+        print(f"  best human_argmax top-1 (val-map):                    {best_human_argmax_top1:.3f}")
 
     import matplotlib.pyplot as plt
-    n_panels = 5 if all_annotations else 2
+    has_human = bool(train_annotations or val_map_annotations)
+    n_panels = 5 if has_human else 2
     fig, axes = plt.subplots(n_panels, 1, figsize=(8, 2.6 * n_panels), sharex=True)
     epochs = range(1, args.epochs + 1)
     axes[0].plot(epochs, train_losses); axes[0].set_ylabel("Train Loss"); axes[0].grid(True)
     axes[1].plot(epochs, val_pm1s,  color="orange",    label="top-1±1 (DDG)")
     axes[1].plot(epochs, val_top3s, color="steelblue", linestyle="--", label="top-3")
     axes[1].set_ylabel("Val Acc (auto)"); axes[1].grid(True); axes[1].legend(loc="lower right")
-    if all_annotations:
-        axes[2].plot(epochs, hpair_alls,   label=f"all ({n_all})")
-        axes[2].plot(epochs, hpair_trains, label=f"train ({n_train})")
-        axes[2].plot(epochs, hpair_vals,   label=f"val ({n_val})")
-        axes[2].axhline(0.5, color="red", linestyle=":", alpha=0.4)
+
+    if has_human:
+        if hpair_trains: axes[2].plot(epochs, hpair_trains, label="train (sanity)")
+        if hpair_vals:   axes[2].plot(epochs, hpair_vals,   label="val (val-map)")
+        axes[2].axhline(0.5, color="red", linestyle=":", alpha=0.4, label="chance")
         axes[2].set_ylabel("HP Pairwise"); axes[2].grid(True); axes[2].legend(loc="lower right")
-        axes[3].plot(epochs, ha_t1_alls,   label=f"all ({n_all})")
-        axes[3].plot(epochs, ha_t1_trains, label=f"train ({n_train})")
-        axes[3].plot(epochs, ha_t1_vals,   label=f"val ({n_val})")
-        axes[3].axhline(0.354, color="red", linestyle=":", alpha=0.4, label="random")
+
+        if ha_t1_trains: axes[3].plot(epochs, ha_t1_trains, label="train (sanity)")
+        if ha_t1_vals:   axes[3].plot(epochs, ha_t1_vals,   label="val (val-map)")
         axes[3].set_ylabel("HP Argmax (top-1)"); axes[3].grid(True); axes[3].legend(loc="lower right")
-        axes[4].plot(epochs, ha_pm1_alls,   label=f"all ({n_all})")
-        axes[4].plot(epochs, ha_pm1_trains, label=f"train ({n_train})")
-        axes[4].plot(epochs, ha_pm1_vals,   label=f"val ({n_val})")
-        axes[4].axhline(0.812, color="red", linestyle=":", alpha=0.4, label="random")
+
+        if ha_pm1_trains: axes[4].plot(epochs, ha_pm1_trains, label="train (sanity)")
+        if ha_pm1_vals:   axes[4].plot(epochs, ha_pm1_vals,   label="val (val-map)")
         axes[4].set_ylabel("HP Argmax±1"); axes[4].grid(True); axes[4].legend(loc="lower right")
+
     axes[-1].set_xlabel("Epoch")
     fig.tight_layout()
     plot_path = Path(args.output).with_suffix(".png")
