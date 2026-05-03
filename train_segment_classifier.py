@@ -421,59 +421,6 @@ def evaluate_human_pairs(
 
 
 @torch.no_grad()
-def evaluate_human_worst_match(
-    model: "Segment3DCNN",
-    annotations: Dict[str, List[Tuple[int, int]]],
-    device: str,
-    context_segments: int = 1,
-) -> Tuple[float, float, float, int]:
-    """For each annotated rollout, score every segment and check how close
-    argmax(scores) is to the human's worst segment.
-
-    Returns (top1, top1_pm1, top3, n_rollouts_evaluated).
-      top1     — argmax(scores) == human worst
-      top1_pm1 — |argmax(scores) - human worst| ≤ 1   (deployment-shape; mirrors the auto top-1±1)
-      top3     — human worst ∈ top-3 by score
-
-    For pool-mode annotations (multiple pairs per rollout), the per-rollout
-    "human worst" is the segment that appears most often as `worst` across
-    that rollout's labeled pairs. Ties are broken by lowest index.
-    """
-    from collections import Counter
-
-    model.eval()
-    t1 = pm1 = t3 = total = 0
-    for path_key, pair_list in annotations.items():
-        path = Path(path_key)
-        if not path.exists():
-            continue
-        data = np.load(str(path), allow_pickle=True)
-        S = len(data["segment_diffs"]) - (context_segments - 1)
-        if S < 2:
-            continue
-
-        # Majority vote on worst (one prediction per rollout).
-        votes = Counter(w for w, _c in pair_list if 0 <= w < S)
-        if not votes:
-            continue
-        wi = min(c for c, n in votes.items() if n == max(votes.values()))
-
-        feats = np.stack([
-            featurize_segment(data["obstacles"], data["positions"], data["goals"], s, context_segments=context_segments)
-            for s in range(S)
-        ])
-        scores = model(torch.from_numpy(feats).to(device)).cpu().numpy()
-        pred = int(np.argmax(scores))
-        t1 += int(pred == wi)
-        pm1 += int(abs(pred - wi) <= 1)
-        t3 += int(wi in set(np.argsort(scores)[-3:].tolist()))
-        total += 1
-    if total == 0:
-        return 0.0, 0.0, 0.0, 0
-    return t1 / total, pm1 / total, t3 / total, total
-
-
-@torch.no_grad()
 def evaluate_metrics(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> Tuple[float, float]:
     """
     For each val episode compute two metrics:
@@ -638,17 +585,13 @@ def main():
     else:
         scheduler = None
 
-    # We track up to four best-checkpoint criteria, written to up to four .pt files:
+    # We track two best-checkpoint criteria, written to up to two .pt files:
     #   args.output                              — best human_val pairwise on val-map labels (the human val signal)
     #   {stem}.argmax_pm1.pt                     — best DDG-aligned top-1±1 on val-map auto labels
-    #   {stem}.human_argmax.pt                   — best human-argmax±1 on val-map labels
-    #   {stem}.human_argmax_top1.pt              — best human-argmax exact-match on val-map labels
     #
     # If --val-annotations isn't passed, only argmax_pm1 is saved (no human val signal).
     primary_path = Path(args.output)
-    pm1_path             = primary_path.with_name(primary_path.stem + ".argmax_pm1"        + primary_path.suffix)
-    human_argmax_path    = primary_path.with_name(primary_path.stem + ".human_argmax"      + primary_path.suffix)
-    human_top1_path      = primary_path.with_name(primary_path.stem + ".human_argmax_top1" + primary_path.suffix)
+    pm1_path = primary_path.with_name(primary_path.stem + ".argmax_pm1" + primary_path.suffix)
 
     def _save_ckpt(path: Path, criterion: str, value: float):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -662,14 +605,10 @@ def main():
         }, str(path))
 
     train_losses, val_pm1s, val_top3s = [], [], []
-    # Train-side sanity (model should memorize the labels it trains on).
-    hpair_trains, ha_t1_trains, ha_pm1_trains = [], [], []
-    # Val-map (held-out maps + human labels) — the actual human val signal.
-    hpair_vals, ha_t1_vals, ha_pm1_vals = [], [], []
+    hpair_trains = []  # pairwise sanity on training labels
+    hpair_vals = []    # pairwise on val-map labels — the actual human val signal
     best_pm1 = 0.0
     best_human_val = 0.0
-    best_human_argmax_pm1 = 0.0
-    best_human_argmax_top1 = 0.0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -697,29 +636,21 @@ def main():
         cur_lr = optimizer.param_groups[0]["lr"]
         msg = f"Epoch {epoch:3d} | lr {cur_lr:.2e} | loss {avg_loss:.4f} | top-1±1 {pm1:.3f} | top-3 {top3:.3f}"
 
-        # Train-side sanity: pairwise + argmax accuracy on the rollouts we trained on.
+        # Train-side sanity: pairwise accuracy on the rollouts we trained on.
         # Should saturate near 1.0 once training converges; useful as a debug signal.
-        hp_train = ha_t1_train = ha_pm1_train = 0.0
+        hp_train = 0.0
         if train_annotations:
             hp_train, _ = evaluate_human_pairs(model, train_annotations, device, args.context_segments)
-            ha_t1_train, ha_pm1_train, _, _ = evaluate_human_worst_match(
-                model, train_annotations, device, args.context_segments,
-            )
-            hpair_trains.append(hp_train); ha_t1_trains.append(ha_t1_train); ha_pm1_trains.append(ha_pm1_train)
+            hpair_trains.append(hp_train)
 
         # Held-out human val (val-map rollouts + human labels). The actual generalization signal.
-        hp_val = ha_t1_val = ha_pm1_val = 0.0
+        hp_val = 0.0
         if val_map_annotations:
             hp_val, _ = evaluate_human_pairs(model, val_map_annotations, device, args.context_segments)
-            ha_t1_val, ha_pm1_val, _, _ = evaluate_human_worst_match(
-                model, val_map_annotations, device, args.context_segments,
-            )
-            hpair_vals.append(hp_val); ha_t1_vals.append(ha_t1_val); ha_pm1_vals.append(ha_pm1_val)
+            hpair_vals.append(hp_val)
 
         if train_annotations or val_map_annotations:
-            msg += (f" | hp tr/val {hp_train:.3f}/{hp_val:.3f}"
-                    f" | h-arg t1 tr/val {ha_t1_train:.3f}/{ha_t1_val:.3f}"
-                    f" | h-arg ±1 tr/val {ha_pm1_train:.3f}/{ha_pm1_val:.3f}")
+            msg += f" | human_val tr/val {hp_train:.3f}/{hp_val:.3f}"
 
         print(msg)
 
@@ -729,31 +660,21 @@ def main():
             _save_ckpt(pm1_path, "argmax_pm1", best_pm1)
             print(f"  → saved {pm1_path.name} (best argmax_pm1: {best_pm1:.3f})")
 
-        # Human-val-driven checkpoints: only fire when --val-annotations is set.
+        # Human-val-driven checkpoint: only fires when --val-annotations is set.
         if val_map_annotations and hpair_vals:
             if hpair_vals[-1] > best_human_val:
                 best_human_val = hpair_vals[-1]
                 _save_ckpt(primary_path, "human_val", best_human_val)
                 print(f"  → saved {primary_path.name} (best human_val: {best_human_val:.3f})")
-            if ha_pm1_val > best_human_argmax_pm1:
-                best_human_argmax_pm1 = ha_pm1_val
-                _save_ckpt(human_argmax_path, "human_argmax_pm1", best_human_argmax_pm1)
-                print(f"  → saved {human_argmax_path.name} (best human_argmax±1: {best_human_argmax_pm1:.3f})")
-            if ha_t1_val > best_human_argmax_top1:
-                best_human_argmax_top1 = ha_t1_val
-                _save_ckpt(human_top1_path, "human_argmax_top1", best_human_argmax_top1)
-                print(f"  → saved {human_top1_path.name} (best human_argmax top-1: {best_human_argmax_top1:.3f})")
 
     print(f"Training complete.")
     print(f"  best argmax_pm1 (DDG-aligned, val map seeds 144-147): {best_pm1:.3f}")
     if val_map_annotations:
         print(f"  best human_val (pairwise, val-map labels):           {best_human_val:.3f}  [random=0.5]")
-        print(f"  best human_argmax±1 (val-map):                        {best_human_argmax_pm1:.3f}")
-        print(f"  best human_argmax top-1 (val-map):                    {best_human_argmax_top1:.3f}")
 
     import matplotlib.pyplot as plt
     has_human = bool(train_annotations or val_map_annotations)
-    n_panels = 5 if has_human else 2
+    n_panels = 3 if has_human else 2
     fig, axes = plt.subplots(n_panels, 1, figsize=(8, 2.6 * n_panels), sharex=True)
     epochs = range(1, args.epochs + 1)
     axes[0].plot(epochs, train_losses); axes[0].set_ylabel("Train Loss"); axes[0].grid(True)
@@ -765,15 +686,7 @@ def main():
         if hpair_trains: axes[2].plot(epochs, hpair_trains, label="train (sanity)")
         if hpair_vals:   axes[2].plot(epochs, hpair_vals,   label="val (val-map)")
         axes[2].axhline(0.5, color="red", linestyle=":", alpha=0.4, label="chance")
-        axes[2].set_ylabel("HP Pairwise"); axes[2].grid(True); axes[2].legend(loc="lower right")
-
-        if ha_t1_trains: axes[3].plot(epochs, ha_t1_trains, label="train (sanity)")
-        if ha_t1_vals:   axes[3].plot(epochs, ha_t1_vals,   label="val (val-map)")
-        axes[3].set_ylabel("HP Argmax (top-1)"); axes[3].grid(True); axes[3].legend(loc="lower right")
-
-        if ha_pm1_trains: axes[4].plot(epochs, ha_pm1_trains, label="train (sanity)")
-        if ha_pm1_vals:   axes[4].plot(epochs, ha_pm1_vals,   label="val (val-map)")
-        axes[4].set_ylabel("HP Argmax±1"); axes[4].grid(True); axes[4].legend(loc="lower right")
+        axes[2].set_ylabel("human_val (pairwise)"); axes[2].grid(True); axes[2].legend(loc="lower right")
 
     axes[-1].set_xlabel("Epoch")
     fig.tight_layout()

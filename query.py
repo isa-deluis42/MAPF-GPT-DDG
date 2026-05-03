@@ -304,10 +304,12 @@ def normalize_features(features):
 
 def load_torch_model(model_path):
     """
+    Load a Segment3DCNN checkpoint saved by train_segment_classifier.py.
 
-    Expects a PyTorch model saved with torch.save(model, path), where:
-        model(features_tensor) -> scores
-
+    The checkpoint is a dict with `state_dict` and architecture metadata
+    (`base_ch`, `in_channels`, `context_segments`). Returns a dict bundling
+    the eval-mode model with the metadata score_segments needs to build
+    the right input tensors.
     """
     if model_path is None:
         return None
@@ -317,26 +319,63 @@ def load_torch_model(model_path):
     except ImportError:
         raise ImportError("PyTorch is required to use --model-path.")
 
-    model = torch.load(model_path, map_location="cpu")
+    from train_segment_classifier import Segment3DCNN
+
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
+        raise ValueError(
+            f"Unexpected checkpoint format at {model_path}: expected a dict "
+            "with a 'state_dict' key (as written by train_segment_classifier.py)."
+        )
+
+    base_ch = ckpt.get("base_ch", 16)
+    in_channels = ckpt.get("in_channels", 4)
+    context_segments = ckpt.get("context_segments", 1)
+
+    model = Segment3DCNN(in_channels=in_channels, base_ch=base_ch)
+    model.load_state_dict(ckpt["state_dict"])
     model.eval()
-    return model
+
+    return {
+        "model": model,
+        "context_segments": context_segments,
+    }
 
 
-def score_segments(features, model=None):
+def build_cnn_inputs(positions, goals, obstacles, num_segments, context_segments):
+    """Build the (S, 4, T, H_pad, W_pad) tensor stack the CNN expects."""
+    from train_segment_classifier import featurize_segment
+
+    tensors = [
+        featurize_segment(
+            obstacles=obstacles,
+            positions=positions,
+            goals=goals,
+            segment_idx=seg_idx,
+            context_segments=context_segments,
+        )
+        for seg_idx in range(num_segments)
+    ]
+    return np.stack(tensors, axis=0)
+
+
+def score_segments(cnn_inputs, model=None):
     """
     Return one scalar score per segment.
 
-    If no model is provided, return zeros. That makes p=0.5 for every pair,
-    so pair selection is driven by feature distance.
+    `cnn_inputs` is the (S, 4, T, H, W) stack from build_cnn_inputs, or None
+    when no model is provided. With no model, return zeros so p=0.5 for every
+    pair and selection is driven by feature distance.
     """
-    if model is None:
-        return np.zeros(features.shape[0], dtype=np.float32)
+    if model is None or cnn_inputs is None:
+        n = 0 if cnn_inputs is None else cnn_inputs.shape[0]
+        return np.zeros(n, dtype=np.float32)
 
     import torch
 
     with torch.no_grad():
-        x = torch.tensor(features, dtype=torch.float32)
-        scores = model(x)
+        x = torch.tensor(cnn_inputs, dtype=torch.float32)
+        scores = model["model"](x)
 
         if isinstance(scores, tuple):
             scores = scores[0]
@@ -359,11 +398,12 @@ def build_candidate_pairs(num_segments):
 # candidate, accepts it unless the episode has hit its per-episode cap, and
 # stops when the label budget is exhausted.
 
-def load_episode_for_pool(npz_path):
+def load_episode_for_pool(npz_path, model=None):
     """Load + featurize one episode for pool-based selection.
 
     Returns a dict with everything needed to render and label the picked pairs
-    later, or None if the episode is unusable.
+    later, or None if the episode is unusable. When `model` is provided, also
+    builds the CNN input tensor used for model scoring.
     """
     try:
         data = np.load(npz_path, allow_pickle=True)
@@ -392,6 +432,16 @@ def load_episode_for_pool(npz_path):
         segment_ranges=segment_ranges,
     )
 
+    cnn_inputs = None
+    if model is not None:
+        cnn_inputs = build_cnn_inputs(
+            positions=positions,
+            goals=goals,
+            obstacles=obstacles,
+            num_segments=num_segments,
+            context_segments=model["context_segments"],
+        )
+
     return {
         "npz_path": npz_path,
         "scenario_id": Path(npz_path).stem,
@@ -402,6 +452,7 @@ def load_episode_for_pool(npz_path):
         "segment_ranges": segment_ranges,
         "features": features,
         "feature_names": feature_names,
+        "cnn_inputs": cnn_inputs,
     }
 
 
@@ -419,7 +470,7 @@ def gather_pool_candidates(episodes, model, prior_annotations, random_mode=False
 
     # Per-episode model scores. Score in one pass per episode rather than one
     # giant tensor since episode-level shapes match the model's expectation.
-    per_episode_scores = [score_segments(ep["features"], model=model) for ep in episodes]
+    per_episode_scores = [score_segments(ep.get("cnn_inputs"), model=model) for ep in episodes]
 
     # Global feature normalization: stack all segment features and normalize
     # against the joint mean/std. This makes ||phi_A - phi_B|| comparable
@@ -733,12 +784,12 @@ def process_npz(npz_path, output_path, model=None, skip_already_labeled=True):
         print(f"Skipping already-labeled episode: {scenario_id}")
         return "skipped_existing"
 
-    episode = load_episode_for_pool(npz_path)
+    episode = load_episode_for_pool(npz_path, model=model)
     if episode is None:
         print(f"Skipping {npz_path}: missing keys, <2 segments, or load error")
         return "failed"
 
-    scores = score_segments(episode["features"], model=model)
+    scores = score_segments(episode.get("cnn_inputs"), model=model)
     pair_info = choose_best_pair(episode["features"], scores)
     if pair_info is None:
         print(f"Skipping {npz_path}: no valid candidate pairs")
@@ -867,7 +918,7 @@ def run_pool_query_loop(
     episodes = []
     skipped_load = 0
     for npz_path in npz_files:
-        ep = load_episode_for_pool(npz_path)
+        ep = load_episode_for_pool(npz_path, model=model)
         if ep is None:
             skipped_load += 1
             continue
