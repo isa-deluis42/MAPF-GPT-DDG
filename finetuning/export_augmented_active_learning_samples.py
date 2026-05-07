@@ -1,9 +1,6 @@
 """
 Export augmented active-learning samples for congestion classification.
 
-This implements the "augment query" strategy described in the active-learning
-image:
-
 1. Pick labeled seed examples, usually from the rare class.
 2. Generate nearby synthetic examples by perturbing the input.
 3. Score synthetic examples with the current classifier.
