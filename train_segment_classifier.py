@@ -41,9 +41,10 @@ from held_out_seed_set import (
     STEPS_DELTA, GRID_PAD_SIZE, TRAIN_MAP_SEEDS, VAL_MAP_SEEDS,
 )
 
-# Diff thresholds (matching DDG's FastSolverDeltaConfig)
-DIFF_CONFIDENT_POS = 3
-DIFF_CONFIDENT_NEG = 1
+# Pair-weighting: a pair (i, j) with diff[i] > diff[j] gets weight
+# min(diff[i] - diff[j], MAX_PAIR_GAP) / MAX_PAIR_GAP. Gaps at or above this
+# clip to weight 1.0; smaller gaps ramp linearly down to 0.
+MAX_PAIR_GAP = 5
 
 
 # ---------------------------------------------------------------------------
@@ -228,57 +229,35 @@ def _augment(feat_a: np.ndarray, feat_b: np.ndarray):
 # Pair generation
 # ---------------------------------------------------------------------------
 
-def _diff_bucket(diff: int):
-    """Bucket a segment_diff for pair-generation purposes.
-
-    Returns None for diff == 0 because that value is *unreliable* — it usually
-    arises when LaCAM's makespan was identical at both segment boundaries
-    (both probes timed out hitting MAX_EPISODE_STEPS, OR both saw a trivial
-    residual problem because most agents had already reached goals). Either
-    way, diff=0 doesn't reflect "no congestion change" — it reflects "LaCAM
-    saw the same problem twice." We treat it as unknown and exclude such
-    segments from auto-pair generation entirely.
-    """
-    if diff == 0:
-        return None
-    if diff > DIFF_CONFIDENT_POS:
-        return "pos"
-    if diff < DIFF_CONFIDENT_NEG:
-        return "neg"
-    return "mid"
-
-
 def generate_pairs(segment_diffs: np.ndarray, context_segments: int = 1) -> List[Tuple[int, int, float]]:
     """
-    Return (i, j, weight) pairs where segment i should score higher than j.
+    Return (i, j, weight) pairs where segment i should score higher than j,
+    weighted by the size of the diff gap.
 
     The last (context_segments - 1) segments are excluded from training pairs
     because their forward context is partially zero-padded. Segments with
-    diff == 0 are also excluded — see _diff_bucket.
+    diff == 0 are excluded entirely: that value is *corrupt*, not "no change"
+    — it usually arises when LaCAM's makespan was identical at both segment
+    boundaries (both probes timed out hitting MAX_EPISODE_STEPS, OR both saw
+    a trivial residual problem because most agents had already reached
+    goals). Either way, diff=0 reflects "LaCAM saw the same problem twice"
+    rather than a real signal.
 
-    Weights:
-      confident_pos vs confident_neg  → 1.0
-      one confident, one midrange     → 0.5
-      both midrange                   → skipped (0.0)
+    Weight: min(diff[i] - diff[j], MAX_PAIR_GAP) / MAX_PAIR_GAP. Larger gaps
+    are confident orderings (weight 1.0); small gaps are weak signal.
     """
     pairs = []
     S = len(segment_diffs) - (context_segments - 1)
     for i in range(S):
-        bi = _diff_bucket(segment_diffs[i])
-        if bi is None:
+        if segment_diffs[i] == 0:
             continue
         for j in range(S):
-            if i == j or segment_diffs[i] <= segment_diffs[j]:
+            if i == j or segment_diffs[j] == 0:
                 continue
-            bj = _diff_bucket(segment_diffs[j])
-            if bj is None:
+            gap = int(segment_diffs[i]) - int(segment_diffs[j])
+            if gap <= 0:
                 continue
-            if bi == "pos" and bj == "neg":
-                w = 1.0
-            elif (bi == "pos" and bj == "mid") or (bi == "mid" and bj == "neg"):
-                w = 0.5
-            else:
-                continue
+            w = min(gap, MAX_PAIR_GAP) / MAX_PAIR_GAP
             pairs.append((i, j, w))
     return pairs
 
@@ -479,7 +458,10 @@ def main():
     parser.add_argument("--min_checkpoint", type=int, default=0,
                         help="Skip episodes from MAPF-GPT checkpoint_iter < this (default: 0 = use all)")
     parser.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine", "plateau"],
-                        help="LR schedule: 'none' (constant), 'cosine' (CosineAnnealingLR), 'plateau' (ReduceLROnPlateau on top-1±1)")
+                        help="LR schedule: 'none' (constant), 'cosine' (CosineAnnealingLR), 'plateau' (ReduceLROnPlateau on top-3)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Build the train dataset, print pair-count and weight-distribution stats, "
+                             "then exit before training. Useful for sanity-checking pair generation.")
     parser.add_argument("--init-from", type=str, default=None,
                         help="Path to a .pt checkpoint to initialize weights from before training. "
                              "Used for warm-start fine-tuning across Stages 2/3/4 — initializes from "
@@ -549,6 +531,33 @@ def main():
             f"  ↳ {train_dataset.n_overridden} train episodes had auto pairs replaced "
             f"by {train_dataset.n_human_pairs} human pair(s) total"
         )
+
+    if args.dry_run:
+        from collections import Counter
+        n_eps = len(train_dataset.episodes)
+        per_ep = Counter(p[0] for p in train_dataset.pairs)
+        counts = np.array([per_ep.get(i, 0) for i in range(n_eps)], dtype=int)
+        weights = np.array([p[3] for p in train_dataset.pairs], dtype=float)
+        bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        hist, _ = np.histogram(weights, bins=bins + [1.0001])
+        total_w = float(weights.sum())
+
+        print("\n=== Dry run: pair stats (TRAIN_MAP_SEEDS) ===")
+        print(f"Episodes loaded:      {n_eps}")
+        print(f"Episodes w/ ≥1 pair:  {(counts > 0).sum()}  ({(counts == 0).sum()} contributed zero)")
+        if (counts > 0).any():
+            nz = counts[counts > 0]
+            print(f"Pairs/episode (nonzero only): min={nz.min()}  median={int(np.median(nz))}  "
+                  f"mean={nz.mean():.1f}  max={nz.max()}")
+        print(f"Total pairs:          {len(weights)}")
+        print(f"Total weight (sum):   {total_w:.1f}  "
+              f"(mean weight {weights.mean():.3f})")
+        print("Weight histogram:")
+        for lo, hi, c in zip(bins, bins[1:] + [1.0], hist):
+            bar = "#" * int(40 * c / max(hist.max(), 1))
+            print(f"  ({lo:.1f}, {hi:.1f}]  {c:7d}  {bar}")
+        print("=== Dry run complete; exiting before training. ===")
+        return
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
