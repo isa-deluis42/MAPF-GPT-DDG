@@ -359,16 +359,17 @@ def build_cnn_inputs(positions, goals, obstacles, num_segments, context_segments
     return np.stack(tensors, axis=0)
 
 
-def score_segments(cnn_inputs, model=None):
+def score_segments(cnn_inputs, model=None, num_segments=None):
     """
     Return one scalar score per segment.
 
     `cnn_inputs` is the (S, 4, T, H, W) stack from build_cnn_inputs, or None
     when no model is provided. With no model, return zeros so p=0.5 for every
-    pair and selection is driven by feature distance.
+    pair and selection is driven by feature distance — `num_segments` sizes
+    the zero array in that case.
     """
     if model is None or cnn_inputs is None:
-        n = 0 if cnn_inputs is None else cnn_inputs.shape[0]
+        n = cnn_inputs.shape[0] if cnn_inputs is not None else (num_segments or 0)
         return np.zeros(n, dtype=np.float32)
 
     import torch
@@ -470,7 +471,10 @@ def gather_pool_candidates(episodes, model, prior_annotations, random_mode=False
 
     # Per-episode model scores. Score in one pass per episode rather than one
     # giant tensor since episode-level shapes match the model's expectation.
-    per_episode_scores = [score_segments(ep.get("cnn_inputs"), model=model) for ep in episodes]
+    per_episode_scores = [
+        score_segments(ep.get("cnn_inputs"), model=model, num_segments=len(ep["features"]))
+        for ep in episodes
+    ]
 
     # Global feature normalization: stack all segment features and normalize
     # against the joint mean/std. This makes ||phi_A - phi_B|| comparable
@@ -789,7 +793,9 @@ def process_npz(npz_path, output_path, model=None, skip_already_labeled=True):
         print(f"Skipping {npz_path}: missing keys, <2 segments, or load error")
         return "failed"
 
-    scores = score_segments(episode.get("cnn_inputs"), model=model)
+    scores = score_segments(
+        episode.get("cnn_inputs"), model=model, num_segments=len(episode["features"])
+    )
     pair_info = choose_best_pair(episode["features"], scores)
     if pair_info is None:
         print(f"Skipping {npz_path}: no valid candidate pairs")
