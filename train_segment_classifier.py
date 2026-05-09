@@ -366,7 +366,7 @@ class Segment3DCNN(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Validation: top-3 agreement
+# Validation: weighted pairwise ranking accuracy
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
@@ -400,13 +400,19 @@ def evaluate_human_pairs(
 
 
 @torch.no_grad()
-def evaluate_metrics(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> float:
+def evaluate_pair_accuracy(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> float:
     """
-    For each val episode, check whether argmax(segment_diffs) is in the CNN's
-    top-3 scored segments. Returns the fraction of episodes where it is.
+    Weighted pairwise ranking accuracy on val-map auto-pairs.
+
+    For each val episode, generate pairs the same way training does (gap-clipped
+    weights, diff==0 excluded), score every segment, and accumulate
+        weight * 1[score[i] > score[j]]
+    Return the weighted accuracy: (sum of weight on correctly-ordered pairs) /
+    (total weight). Matches training distribution and weighting, so it's the
+    most direct val-side analog of training loss.
     """
     model.eval()
-    top3_correct = total = 0
+    correct_w = total_w = 0.0
 
     for path in sorted(episode_paths):
         data = np.load(str(path), allow_pickle=True)
@@ -414,25 +420,25 @@ def evaluate_metrics(model: Segment3DCNN, episode_paths: List[Path], map_seed_fi
             continue
 
         diffs = data["segment_diffs"]
-        S = len(diffs)
-        if S < 2:
+        pairs = generate_pairs(diffs, context_segments=context_segments)
+        if not pairs:
             continue
 
+        S = len(diffs) - (context_segments - 1)
         feats = np.stack([
             featurize_segment(data["obstacles"], data["positions"], data["goals"], s, context_segments=context_segments)
             for s in range(S)
         ])
         scores = model(torch.from_numpy(feats).to(device)).cpu().numpy()
 
-        true_best = int(np.argmax(diffs))
-        top3 = set(np.argsort(scores)[-3:].tolist())
+        for i, j, w in pairs:
+            total_w += w
+            if scores[i] > scores[j]:
+                correct_w += w
 
-        top3_correct += int(true_best in top3)
-        total += 1
-
-    if total == 0:
+    if total_w == 0.0:
         return 0.0
-    return top3_correct / total
+    return correct_w / total_w
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +464,7 @@ def main():
     parser.add_argument("--min_checkpoint", type=int, default=0,
                         help="Skip episodes from MAPF-GPT checkpoint_iter < this (default: 0 = use all)")
     parser.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine", "plateau"],
-                        help="LR schedule: 'none' (constant), 'cosine' (CosineAnnealingLR), 'plateau' (ReduceLROnPlateau on top-3)")
+                        help="LR schedule: 'none' (constant), 'cosine' (CosineAnnealingLR), 'plateau' (ReduceLROnPlateau on pair_acc)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Build the train dataset, print pair-count and weight-distribution stats, "
                              "then exit before training. Useful for sanity-checking pair generation.")
@@ -592,11 +598,11 @@ def main():
 
     # We track two best-checkpoint criteria, written to up to two .pt files:
     #   args.output                              — best human_val pairwise on val-map labels (the human val signal)
-    #   {stem}.top3.pt                           — best top-3 accuracy on val-map auto labels
+    #   {stem}.pair_acc.pt                       — best weighted pairwise accuracy on val-map auto labels
     #
-    # If --val-annotations isn't passed, only top3 is saved (no human val signal).
+    # If --val-annotations isn't passed, only pair_acc is saved (no human val signal).
     primary_path = Path(args.output)
-    top3_path = primary_path.with_name(primary_path.stem + ".top3" + primary_path.suffix)
+    pair_acc_path = primary_path.with_name(primary_path.stem + ".pair_acc" + primary_path.suffix)
 
     def _save_ckpt(path: Path, criterion: str, value: float):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -609,10 +615,10 @@ def main():
             "best_metric": value,
         }, str(path))
 
-    train_losses, val_top3s = [], []
+    train_losses, val_pair_accs = [], []
     hpair_trains = []  # pairwise sanity on training labels
     hpair_vals = []    # pairwise on val-map labels — the actual human val signal
-    best_top3 = 0.0
+    best_pair_acc = 0.0
     best_human_val = 0.0
 
     for epoch in range(1, args.epochs + 1):
@@ -627,18 +633,18 @@ def main():
             total_loss += loss.item()
 
         avg_loss = total_loss / len(train_loader)
-        top3 = evaluate_metrics(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
+        pair_acc = evaluate_pair_accuracy(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
         train_losses.append(avg_loss)
-        val_top3s.append(top3)
+        val_pair_accs.append(pair_acc)
 
         if scheduler is not None:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(top3)
+                scheduler.step(pair_acc)
             else:
                 scheduler.step()
 
         cur_lr = optimizer.param_groups[0]["lr"]
-        msg = f"Epoch {epoch:3d} | lr {cur_lr:.2e} | loss {avg_loss:.4f} | top-3 {top3:.3f}"
+        msg = f"Epoch {epoch:3d} | lr {cur_lr:.2e} | loss {avg_loss:.4f} | pair_acc {pair_acc:.3f}"
 
         # Train-side sanity: pairwise accuracy on the rollouts we trained on.
         # Should saturate near 1.0 once training converges; useful as a debug signal.
@@ -658,11 +664,11 @@ def main():
 
         print(msg)
 
-        # Always save best-top3 checkpoint (no annotation dependency — uses auto val).
-        if top3 > best_top3:
-            best_top3 = top3
-            _save_ckpt(top3_path, "top3", best_top3)
-            print(f"  → saved {top3_path.name} (best top3: {best_top3:.3f})")
+        # Always save best-pair_acc checkpoint (no annotation dependency — uses auto val).
+        if pair_acc > best_pair_acc:
+            best_pair_acc = pair_acc
+            _save_ckpt(pair_acc_path, "pair_acc", best_pair_acc)
+            print(f"  → saved {pair_acc_path.name} (best pair_acc: {best_pair_acc:.3f})")
 
         # Human-val-driven checkpoint: only fires when --val-annotations is set.
         if val_map_annotations and hpair_vals:
@@ -672,7 +678,7 @@ def main():
                 print(f"  → saved {primary_path.name} (best human_val: {best_human_val:.3f})")
 
     print(f"Training complete.")
-    print(f"  best top3 (val map seeds 144-147): {best_top3:.3f}")
+    print(f"  best pair_acc (val map seeds 144-147): {best_pair_acc:.3f}")
     if val_map_annotations:
         print(f"  best human_val (pairwise, val-map labels):           {best_human_val:.3f}  [random=0.5]")
 
@@ -682,7 +688,7 @@ def main():
     fig, axes = plt.subplots(n_panels, 1, figsize=(8, 2.6 * n_panels), sharex=True)
     epochs = range(1, args.epochs + 1)
     axes[0].plot(epochs, train_losses); axes[0].set_ylabel("Train Loss"); axes[0].grid(True)
-    axes[1].plot(epochs, val_top3s, color="steelblue", label="top-3")
+    axes[1].plot(epochs, val_pair_accs, color="steelblue", label="weighted pair acc")
     axes[1].set_ylabel("Val Acc (auto)"); axes[1].grid(True); axes[1].legend(loc="lower right")
 
     if has_human:
