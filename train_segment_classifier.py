@@ -421,15 +421,13 @@ def evaluate_human_pairs(
 
 
 @torch.no_grad()
-def evaluate_metrics(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> Tuple[float, float]:
+def evaluate_metrics(model: Segment3DCNN, episode_paths: List[Path], map_seed_filter: set, device: str, context_segments: int = 1) -> float:
     """
-    For each val episode compute two metrics:
-      top1_pm1 — model's argmax score is within ±1 of argmax(segment_diffs) [DDG-aligned]
-      top3     — argmax(segment_diffs) is in the CNN's top-3 scored segments
-    Returns (top1_pm1, top3).
+    For each val episode, check whether argmax(segment_diffs) is in the CNN's
+    top-3 scored segments. Returns the fraction of episodes where it is.
     """
     model.eval()
-    pm1_correct = top3_correct = total = 0
+    top3_correct = total = 0
 
     for path in sorted(episode_paths):
         data = np.load(str(path), allow_pickle=True)
@@ -448,16 +446,14 @@ def evaluate_metrics(model: Segment3DCNN, episode_paths: List[Path], map_seed_fi
         scores = model(torch.from_numpy(feats).to(device)).cpu().numpy()
 
         true_best = int(np.argmax(diffs))
-        pred_best = int(np.argmax(scores))
         top3 = set(np.argsort(scores)[-3:].tolist())
 
-        pm1_correct += int(abs(pred_best - true_best) <= 1)
         top3_correct += int(true_best in top3)
         total += 1
 
     if total == 0:
-        return 0.0, 0.0
-    return pm1_correct / total, top3_correct / total
+        return 0.0
+    return top3_correct / total
 
 
 # ---------------------------------------------------------------------------
@@ -587,11 +583,11 @@ def main():
 
     # We track two best-checkpoint criteria, written to up to two .pt files:
     #   args.output                              — best human_val pairwise on val-map labels (the human val signal)
-    #   {stem}.argmax_pm1.pt                     — best DDG-aligned top-1±1 on val-map auto labels
+    #   {stem}.top3.pt                           — best top-3 accuracy on val-map auto labels
     #
-    # If --val-annotations isn't passed, only argmax_pm1 is saved (no human val signal).
+    # If --val-annotations isn't passed, only top3 is saved (no human val signal).
     primary_path = Path(args.output)
-    pm1_path = primary_path.with_name(primary_path.stem + ".argmax_pm1" + primary_path.suffix)
+    top3_path = primary_path.with_name(primary_path.stem + ".top3" + primary_path.suffix)
 
     def _save_ckpt(path: Path, criterion: str, value: float):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -604,10 +600,10 @@ def main():
             "best_metric": value,
         }, str(path))
 
-    train_losses, val_pm1s, val_top3s = [], [], []
+    train_losses, val_top3s = [], []
     hpair_trains = []  # pairwise sanity on training labels
     hpair_vals = []    # pairwise on val-map labels — the actual human val signal
-    best_pm1 = 0.0
+    best_top3 = 0.0
     best_human_val = 0.0
 
     for epoch in range(1, args.epochs + 1):
@@ -622,19 +618,18 @@ def main():
             total_loss += loss.item()
 
         avg_loss = total_loss / len(train_loader)
-        pm1, top3 = evaluate_metrics(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
+        top3 = evaluate_metrics(model, episode_paths, VAL_MAP_SEEDS, device, context_segments=args.context_segments)
         train_losses.append(avg_loss)
-        val_pm1s.append(pm1)
         val_top3s.append(top3)
 
         if scheduler is not None:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(pm1)
+                scheduler.step(top3)
             else:
                 scheduler.step()
 
         cur_lr = optimizer.param_groups[0]["lr"]
-        msg = f"Epoch {epoch:3d} | lr {cur_lr:.2e} | loss {avg_loss:.4f} | top-1±1 {pm1:.3f} | top-3 {top3:.3f}"
+        msg = f"Epoch {epoch:3d} | lr {cur_lr:.2e} | loss {avg_loss:.4f} | top-3 {top3:.3f}"
 
         # Train-side sanity: pairwise accuracy on the rollouts we trained on.
         # Should saturate near 1.0 once training converges; useful as a debug signal.
@@ -654,11 +649,11 @@ def main():
 
         print(msg)
 
-        # Always save best-pm1 checkpoint (no annotation dependency — uses auto val).
-        if pm1 > best_pm1:
-            best_pm1 = pm1
-            _save_ckpt(pm1_path, "argmax_pm1", best_pm1)
-            print(f"  → saved {pm1_path.name} (best argmax_pm1: {best_pm1:.3f})")
+        # Always save best-top3 checkpoint (no annotation dependency — uses auto val).
+        if top3 > best_top3:
+            best_top3 = top3
+            _save_ckpt(top3_path, "top3", best_top3)
+            print(f"  → saved {top3_path.name} (best top3: {best_top3:.3f})")
 
         # Human-val-driven checkpoint: only fires when --val-annotations is set.
         if val_map_annotations and hpair_vals:
@@ -668,7 +663,7 @@ def main():
                 print(f"  → saved {primary_path.name} (best human_val: {best_human_val:.3f})")
 
     print(f"Training complete.")
-    print(f"  best argmax_pm1 (DDG-aligned, val map seeds 144-147): {best_pm1:.3f}")
+    print(f"  best top3 (val map seeds 144-147): {best_top3:.3f}")
     if val_map_annotations:
         print(f"  best human_val (pairwise, val-map labels):           {best_human_val:.3f}  [random=0.5]")
 
@@ -678,8 +673,7 @@ def main():
     fig, axes = plt.subplots(n_panels, 1, figsize=(8, 2.6 * n_panels), sharex=True)
     epochs = range(1, args.epochs + 1)
     axes[0].plot(epochs, train_losses); axes[0].set_ylabel("Train Loss"); axes[0].grid(True)
-    axes[1].plot(epochs, val_pm1s,  color="orange",    label="top-1±1 (DDG)")
-    axes[1].plot(epochs, val_top3s, color="steelblue", linestyle="--", label="top-3")
+    axes[1].plot(epochs, val_top3s, color="steelblue", label="top-3")
     axes[1].set_ylabel("Val Acc (auto)"); axes[1].grid(True); axes[1].legend(loc="lower right")
 
     if has_human:
