@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+import random
 import tempfile
 from itertools import combinations
 from pathlib import Path
@@ -623,28 +624,34 @@ def _render_segment_svg(npz_path, segment_range, output_path):
     create_multi_animation(obstacles, [history], grid_config, name=str(output_path))
 
 
-def show_pair(npz_path, positions, goals, obstacles, segment_ranges, segment_diffs, pair_info):
+def show_pair(npz_path, positions, goals, obstacles, segment_ranges, segment_diffs, pair_info, swap=False):
     """Render segment A and B to animated SVGs and embed both in a side-by-side
     HTML page. Browser opens once per session at _HTML_PATH; subsequent calls
     overwrite the file in place — refresh the tab to advance.
 
+    `swap=True` flips canonical segment_a and segment_b across the left/right
+    columns so the displayed "Segment A"/"Segment B" no longer correlate with
+    the model's canonical ordering. The caller tracks the swap to map the
+    user's a/b answer back to canonical IDs. Diff and p(A worse) are also
+    omitted from the UI since they would let the user infer the canonical
+    ordering and bias the elicited preference.
+
     Signature kept compatible with the prior matplotlib version. positions,
-    goals, obstacles aren't used directly (the SVG renderer re-opens the npz
-    to get pogema env metadata) but are accepted for backwards compatibility.
+    goals, obstacles, segment_diffs aren't used directly but are accepted
+    for backwards compatibility.
     """
     global _BROWSER_OPENED
 
     a = pair_info["segment_a"]
     b = pair_info["segment_b"]
-    a_start, a_end = segment_ranges[a]
-    b_start, b_end = segment_ranges[b]
-    a_diff = int(segment_diffs[a]) if segment_diffs is not None else None
-    b_diff = int(segment_diffs[b]) if segment_diffs is not None else None
+    left_seg, right_seg = (b, a) if swap else (a, b)
+    left_start, left_end = segment_ranges[left_seg]
+    right_start, right_end = segment_ranges[right_seg]
 
-    svg_a = _SVG_DIR / "query_segment_a.svg"
-    svg_b = _SVG_DIR / "query_segment_b.svg"
-    _render_segment_svg(npz_path, segment_ranges[a], svg_a)
-    _render_segment_svg(npz_path, segment_ranges[b], svg_b)
+    svg_left = _SVG_DIR / "query_segment_a.svg"
+    svg_right = _SVG_DIR / "query_segment_b.svg"
+    _render_segment_svg(npz_path, segment_ranges[left_seg], svg_left)
+    _render_segment_svg(npz_path, segment_ranges[right_seg], svg_right)
 
     html = f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>query — {Path(npz_path).name}</title>
@@ -661,19 +668,18 @@ object {{ width: 100%; height: auto; display: block; }}
 <div class="summary">
   <b>{Path(npz_path).name}</b> &middot;
   EIG proxy <b>{pair_info['eig_proxy']:.4f}</b> &middot;
-  p(A worse) <b>{pair_info['preference_probability_a_worse']:.3f}</b> &middot;
   H(p) <b>{pair_info['entropy']:.3f}</b> &middot;
   ‖φ_A − φ_B‖ <b>{pair_info['feature_distance']:.3f}</b>
   <div class="hint">watch both, then return to the terminal and press <code>a</code> / <code>b</code> / <code>u</code> / <code>s</code> / <code>q</code></div>
 </div>
 <div class="row">
   <div class="col">
-    <h2>Segment A — t={a_start}-{a_end} &middot; diff={a_diff}</h2>
-    <object type="image/svg+xml" data="{svg_a.name}"></object>
+    <h2>Segment A — t={left_start}-{left_end}</h2>
+    <object type="image/svg+xml" data="{svg_left.name}"></object>
   </div>
   <div class="col">
-    <h2>Segment B — t={b_start}-{b_end} &middot; diff={b_diff}</h2>
-    <object type="image/svg+xml" data="{svg_b.name}"></object>
+    <h2>Segment B — t={right_start}-{right_end}</h2>
+    <object type="image/svg+xml" data="{svg_right.name}"></object>
   </div>
 </div>
 </body></html>"""
@@ -719,6 +725,7 @@ def label_one_pair(episode, pair_info, output_path, feature_names):
     segment_ranges = episode["segment_ranges"]
     features = episode["features"]
 
+    swap = random.random() < 0.5
     show_pair(
         npz_path=npz_path,
         positions=positions,
@@ -727,6 +734,7 @@ def label_one_pair(episode, pair_info, output_path, feature_names):
         segment_ranges=segment_ranges,
         segment_diffs=segment_diffs,
         pair_info=pair_info,
+        swap=swap,
     )
 
     answer = prompt_user_for_label()
@@ -734,17 +742,21 @@ def label_one_pair(episode, pair_info, output_path, feature_names):
     if answer == "q":
         return answer
 
-    if answer in {"u", "s"}:
+    canonical_answer = answer
+    if swap and answer in {"a", "b"}:
+        canonical_answer = "b" if answer == "a" else "a"
+
+    if canonical_answer in {"u", "s"}:
         chosen_worse_segment = None
         label = "unsure_or_skipped"
-    elif answer == "a":
+    elif canonical_answer == "a":
         chosen_worse_segment = pair_info["segment_a"]
         label = "a_worse"
-    elif answer == "b":
+    elif canonical_answer == "b":
         chosen_worse_segment = pair_info["segment_b"]
         label = "b_worse"
     else:
-        raise RuntimeError(f"Unexpected answer: {answer}")
+        raise RuntimeError(f"Unexpected answer: {canonical_answer}")
 
     a = pair_info["segment_a"]
     b = pair_info["segment_b"]
@@ -806,7 +818,6 @@ def process_npz(npz_path, output_path, model=None, skip_already_labeled=True):
     print(f"File: {npz_path}")
     print(f"Num steps: {episode['positions'].shape[0]}")
     print(f"Num segments: {len(episode['segment_diffs'])}")
-    print(f"Segment diffs: {episode['segment_diffs'].tolist()}")
     print()
     print(
         "Selected pair:",
@@ -962,7 +973,6 @@ def run_pool_query_loop(
         print(f"[{i}/{len(selected)}] Episode: {cand['scenario_id']}")
         print(f"File: {ep['npz_path']}")
         print(f"Num segments: {len(ep['segment_diffs'])}")
-        print(f"Segment diffs: {ep['segment_diffs'].tolist()}")
         print(
             "Selected pair:",
             f"A={cand['segment_a']},",
