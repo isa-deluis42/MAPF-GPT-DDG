@@ -12,6 +12,12 @@ import numpy as np
 
 EPS = 1e-8
 SEGMENT_LEN = 16
+# Pairs whose two segments have feature-vector distance below this are dropped
+# from the pool before ranking. The handcrafted features are computed
+# deterministically from positions/goals/obstacles, so genuinely-identical
+# segments produce bit-identical feature vectors and a distance of 0; the
+# small epsilon just absorbs float noise.
+IDENTITY_DISTANCE_EPS = 1e-9
 
 
 def sigmoid(x):
@@ -289,18 +295,6 @@ def extract_segment_features(positions, goals, obstacles, segment_ranges):
     return np.array(features, dtype=np.float32), feature_names
 
 
-def normalize_features(features):
-    """
-    Per-episode feature normalization for pair scoring.
-
-    This makes ||phi_A - phi_B|| less sensitive to feature scale.
-    """
-    mean = features.mean(axis=0, keepdims=True)
-    std = features.std(axis=0, keepdims=True)
-
-    return (features - mean) / (std + EPS)
-
-
 # For SHANE: model scoring
 
 def load_torch_model(model_path):
@@ -366,8 +360,8 @@ def score_segments(cnn_inputs, model=None, num_segments=None):
 
     `cnn_inputs` is the (S, 4, T, H, W) stack from build_cnn_inputs, or None
     when no model is provided. With no model, return zeros so p=0.5 for every
-    pair and selection is driven by feature distance — `num_segments` sizes
-    the zero array in that case.
+    pair and entropy is constant — `num_segments` sizes the zero array in
+    that case.
     """
     if model is None or cnn_inputs is None:
         n = cnn_inputs.shape[0] if cnn_inputs is not None else (num_segments or 0)
@@ -394,11 +388,11 @@ def build_candidate_pairs(num_segments):
 
 # Pool-mode helpers
 # -----------------
-# In pool mode we featurize every segment of every eligible episode up front,
-# then rank all (episode, segA, segB) combos by entropy * distance with
-# *globally* normalized features. The greedy selector pops the top-ranked
-# candidate, accepts it unless the episode has hit its per-episode cap, and
-# stops when the label budget is exhausted.
+# In pool mode we score every segment of every eligible episode up front, then
+# rank all (episode, segA, segB) combos by H(sigmoid(s_A - s_B)) — the binary
+# entropy of the model's pairwise preference. The greedy selector pops the
+# top-ranked candidate, accepts it unless the episode has hit its per-episode
+# cap, and stops when the label budget is exhausted.
 
 def load_episode_for_pool(npz_path, model=None):
     """Load + featurize one episode for pool-based selection.
@@ -459,9 +453,9 @@ def load_episode_for_pool(npz_path, model=None):
 
 
 def gather_pool_candidates(episodes, model, prior_annotations, random_mode=False, rng=None):
-    """Score every pair across every episode against globally-normalized features.
+    """Score every pair across every episode by pairwise-preference entropy.
 
-    Returns a list of dicts. By default, sorted by eig_proxy descending (active
+    Returns a list of dicts. By default, sorted by entropy descending (active
     learning). If `random_mode=True`, the list is shuffled instead — used as
     the random-sampling baseline that shares everything with AL except the
     selection criterion. Pairs already present in prior_annotations are excluded.
@@ -477,25 +471,19 @@ def gather_pool_candidates(episodes, model, prior_annotations, random_mode=False
         for ep in episodes
     ]
 
-    # Global feature normalization: stack all segment features and normalize
-    # against the joint mean/std. This makes ||phi_A - phi_B|| comparable
-    # across episodes, which is the whole point of pool mode.
-    all_features = np.concatenate([ep["features"] for ep in episodes], axis=0)
-    mean = all_features.mean(axis=0, keepdims=True)
-    std = all_features.std(axis=0, keepdims=True)
-    normalizer = lambda f: (f - mean) / (std + EPS)
-
     candidates = []
+    identical_skipped = 0
     for ep_idx, ep in enumerate(episodes):
         scores = per_episode_scores[ep_idx]
-        norm_features = normalizer(ep["features"])
-        for a, b in build_candidate_pairs(len(ep["features"])):
+        features = ep["features"]
+        for a, b in build_candidate_pairs(len(features)):
             if already_labeled_pair(prior_annotations, ep["scenario_id"], a, b):
+                continue
+            if np.linalg.norm(features[a] - features[b]) < IDENTITY_DISTANCE_EPS:
+                identical_skipped += 1
                 continue
             p = sigmoid(scores[a] - scores[b])
             entropy = binary_entropy(p)
-            distance = float(np.linalg.norm(norm_features[a] - norm_features[b]))
-            eig_proxy = float(entropy * distance)
             candidates.append({
                 "episode_idx": ep_idx,
                 "scenario_id": ep["scenario_id"],
@@ -505,14 +493,15 @@ def gather_pool_candidates(episodes, model, prior_annotations, random_mode=False
                 "model_score_b": float(scores[b]),
                 "preference_probability_a_worse": float(p),
                 "entropy": float(entropy),
-                "feature_distance": distance,
-                "eig_proxy": eig_proxy,
             })
+
+    if identical_skipped:
+        print(f"  skipped {identical_skipped} pairs with feature-identical segments")
 
     if random_mode:
         (rng or _random).shuffle(candidates)
     else:
-        candidates.sort(key=lambda c: c["eig_proxy"], reverse=True)
+        candidates.sort(key=lambda c: c["entropy"], reverse=True)
     return candidates
 
 
@@ -538,33 +527,29 @@ def select_pool_with_cap(candidates, budget, per_episode_cap, prior_counts):
 def choose_best_pair(features, scores):
     """
     Pick pair with max:
-        H(sigmoid(sA - sB)) * ||phi_A - phi_B||
+        H(sigmoid(sA - sB))
     """
     if len(features) < 2:
         return None
-
-    norm_features = normalize_features(features)
 
     best = None
     best_score = -math.inf
 
     for a, b in build_candidate_pairs(len(features)):
+        if np.linalg.norm(features[a] - features[b]) < IDENTITY_DISTANCE_EPS:
+            continue
         p = sigmoid(scores[a] - scores[b])
-        entropy = binary_entropy(p)
-        distance = np.linalg.norm(norm_features[a] - norm_features[b])
-        eig_proxy = float(entropy * distance)
+        entropy = float(binary_entropy(p))
 
-        if eig_proxy > best_score:
-            best_score = eig_proxy
+        if entropy > best_score:
+            best_score = entropy
             best = {
                 "segment_a": int(a),
                 "segment_b": int(b),
                 "model_score_a": float(scores[a]),
                 "model_score_b": float(scores[b]),
                 "preference_probability_a_worse": float(p),
-                "entropy": float(entropy),
-                "feature_distance": float(distance),
-                "eig_proxy": float(eig_proxy),
+                "entropy": entropy,
             }
 
     return best
@@ -667,9 +652,7 @@ object {{ width: 100%; height: auto; display: block; }}
 </style></head><body>
 <div class="summary">
   <b>{Path(npz_path).name}</b> &middot;
-  EIG proxy <b>{pair_info['eig_proxy']:.4f}</b> &middot;
-  H(p) <b>{pair_info['entropy']:.3f}</b> &middot;
-  ‖φ_A − φ_B‖ <b>{pair_info['feature_distance']:.3f}</b>
+  H(p) <b>{pair_info['entropy']:.3f}</b>
   <div class="hint">watch both, then return to the terminal and press <code>a</code> / <code>b</code> / <code>u</code> / <code>s</code> / <code>q</code></div>
 </div>
 <div class="row">
@@ -779,8 +762,6 @@ def label_one_pair(episode, pair_info, output_path, feature_names):
             "model_score_b": pair_info["model_score_b"],
             "preference_probability_a_worse": pair_info["preference_probability_a_worse"],
             "entropy": pair_info["entropy"],
-            "feature_distance": pair_info["feature_distance"],
-            "eig_proxy": pair_info["eig_proxy"],
             "feature_names": feature_names,
             "feature_a": features[a].astype(float).tolist(),
             "feature_b": features[b].astype(float).tolist(),
@@ -823,7 +804,7 @@ def process_npz(npz_path, output_path, model=None, skip_already_labeled=True):
         "Selected pair:",
         f"A={pair_info['segment_a']},",
         f"B={pair_info['segment_b']},",
-        f"EIG proxy={pair_info['eig_proxy']:.4f}",
+        f"entropy={pair_info['entropy']:.4f}",
     )
 
     answer = label_one_pair(episode, pair_info, output_path, episode["feature_names"])
@@ -895,8 +876,8 @@ def run_pool_query_loop(
 ):
     """Pool-based selection over (episode, segA, segB) candidates.
 
-    Default (active learning): rank candidates by H(p)*||phi_A-phi_B|| against
-    globally-normalized features, greedy-pick the top `budget` respecting
+    Default (active learning): rank candidates by pairwise-preference entropy
+    H(sigmoid(s_A - s_B)), greedy-pick the top `budget` respecting
     `per_episode_cap`, then walk the human through the picked pairs.
 
     `random_mode=True`: shuffle the candidate pool instead of ranking — used as
@@ -977,8 +958,7 @@ def run_pool_query_loop(
             "Selected pair:",
             f"A={cand['segment_a']},",
             f"B={cand['segment_b']},",
-            f"EIG proxy={cand['eig_proxy']:.4f}",
-            f"(entropy={cand['entropy']:.3f}, distance={cand['feature_distance']:.3f})",
+            f"entropy={cand['entropy']:.4f}",
         )
         answer = label_one_pair(ep, cand, output_path, feature_names)
         if answer == "q":
@@ -1046,7 +1026,7 @@ def main():
         default=None,
         help="Pool-based active learning: total label budget. When set, all "
              "(episode, segment_a, segment_b) pairs are pool-ranked by "
-             "H(p)*||phi_A-phi_B|| with globally-normalized features, then the "
+             "pairwise-preference entropy H(sigmoid(s_A - s_B)), then the "
              "top --budget pairs are queried (subject to --per-episode-cap). "
              "If unset, falls back to the per-episode top-1 query loop.",
     )
@@ -1063,10 +1043,10 @@ def main():
     parser.add_argument(
         "--random",
         action="store_true",
-        help="Pool mode: skip the H(p)*||phi_A-phi_B|| acquisition and "
-             "uniformly sample candidates instead. Same one-pair-at-a-time "
-             "labelling protocol — used as the random-sampling baseline "
-             "against which AL acquisition is judged. Requires --budget.",
+        help="Pool mode: skip the entropy acquisition and uniformly sample "
+             "candidates instead. Same one-pair-at-a-time labelling protocol "
+             "— used as the random-sampling baseline against which AL "
+             "acquisition is judged. Requires --budget.",
     )
 
     parser.add_argument(
