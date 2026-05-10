@@ -736,10 +736,10 @@ def main():
     axes[1].set_ylabel("Val Acc (auto)"); axes[1].grid(True); axes[1].legend(loc="lower right")
 
     if has_human:
-        if hpair_trains: axes[2].plot(epochs, hpair_trains, label="train (sanity)")
-        if hpair_vals:   axes[2].plot(epochs, hpair_vals,   label="val (val-map)")
+        if hpair_trains: axes[2].plot(epochs, hpair_trains, label="train")
+        if hpair_vals:   axes[2].plot(epochs, hpair_vals,   label="val")
         axes[2].axhline(0.5, color="red", linestyle=":", alpha=0.4, label="chance")
-        axes[2].set_ylabel("human_val (pairwise)"); axes[2].grid(True); axes[2].legend(loc="lower right")
+        axes[2].set_ylabel("human_val"); axes[2].grid(True); axes[2].legend(loc="lower right")
 
     axes[-1].set_xlabel("Epoch")
     fig.tight_layout()
