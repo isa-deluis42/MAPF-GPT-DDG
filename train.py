@@ -84,6 +84,13 @@ file_size = 50 * 2 ** 11
 max_ratio = 0.25
 size_min = 17
 size_max = 21
+# Segment-ranker DDG: when set, the segment classifier picks which segment per
+# env gets the full LaCAM (replacing fast LaCAM probing). Empty string falls
+# back to the original fast-LaCAM-diff selection.
+segment_classifier_path = "out/segment_classifier/baseline.pt"
+# Top-K env gate for segment-ranker mode: only the K envs (per NUM_ENVS=8 batch)
+# with the highest top-segment score get the full LaCAM. Replaces diff_threshold.
+expert_top_k = 4
 
 train_data_files = ["dataset/train", f"dataset/{dagger_type}"]
 valid_data_file = "dataset/validation"
@@ -372,7 +379,8 @@ while True:
                 logger.info(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, f"ckpt_{dagger_type}_{iter_num}.pt"))
                 if dagger_type != 'standard':
-                    run_dagger(dagger_type, num_workers, device_id, seed*num_workers, file_size, size_min=size_min, size_max=size_max)
+                    run_dagger(dagger_type, num_workers, device_id, seed*num_workers, file_size, size_min=size_min, size_max=size_max,
+                               segment_classifier_path=segment_classifier_path, expert_top_k=expert_top_k)
                     seed += 1000
 
     if iter_num % eval_interval == 0:

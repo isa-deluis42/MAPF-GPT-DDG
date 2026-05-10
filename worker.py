@@ -18,7 +18,8 @@ EXPERT_LACAM_TIMELIMIT = 10
 EPISODE_LENGTH = 256
 NUM_ENVS = 8
 
-def collect_data(seeds, env_generator, worker_id, device_id, actions_required, dagger_type, on_target, path_to_weights, num_agents, grid=None):
+def collect_data(seeds, env_generator, worker_id, device_id, actions_required, dagger_type, on_target, path_to_weights, num_agents, grid=None,
+                 segment_classifier_path=None, expert_top_k=None):
     inputs = []
     gt_actions = []
     actions_counters = [0 for _ in range(5)]
@@ -47,7 +48,12 @@ def collect_data(seeds, env_generator, worker_id, device_id, actions_required, d
                                     on_target=on_target)
             envs.append(env)
         if 'ddg' in dagger_type:
-            data, log = fast_solver_delta(envs, learnable_algo, fast_solver, solver, FastSolverDeltaConfig(on_target=on_target))
+            data, log = fast_solver_delta(envs, learnable_algo, fast_solver, solver, FastSolverDeltaConfig(
+                on_target=on_target,
+                segment_classifier_path=segment_classifier_path,
+                expert_top_k=expert_top_k,
+                segment_classifier_device=f"cuda:{device_id}",
+            ))
             logs.extend(log)
         else:
             data = {'inputs': [], 'gt_actions': []}
@@ -91,6 +97,8 @@ def main():
     parser.add_argument('--file_size', type=int, default=50 * 2 ** 11, help='File size (default: %(default)d)')
     parser.add_argument('--size_min', type=int, default=17, help='Minimum map size (default: %(default)d)')
     parser.add_argument('--size_max', type=int, default=21, help='Maximum map size (default: %(default)d)')
+    parser.add_argument('--segment_classifier_path', type=str, default=None, help='Path to segment classifier checkpoint (DDG segment selection).')
+    parser.add_argument('--expert_top_k', type=int, default=None, help='Top-K env gate for segment-ranker mode.')
     args = parser.parse_args()
     all_logs = []
     num_agents = list(map(int, args.num_agents.split(',')))
@@ -106,17 +114,21 @@ def main():
                                                     dagger_type=args.dagger_type,
                                                     on_target="nothing",
                                                     path_to_weights=args.path_to_weights,
-                                                    num_agents=num_agents)
+                                                    num_agents=num_agents,
+                                                    segment_classifier_path=args.segment_classifier_path,
+                                                    expert_top_k=args.expert_top_k)
         all_logs.extend(logs)
         random_inputs, random_gt_actions, logs = collect_data(seeds=seeds,
                                                         env_generator=random_gen,
-                                                        worker_id=args.worker_id, 
+                                                        worker_id=args.worker_id,
                                                         device_id=args.device_id,
-                                                        actions_required=args.file_size // 50, 
+                                                        actions_required=args.file_size // 50,
                                                         dagger_type=args.dagger_type,
                                                         on_target="nothing",
                                                         path_to_weights=args.path_to_weights,
-                                                        num_agents=num_agents)
+                                                        num_agents=num_agents,
+                                                        segment_classifier_path=args.segment_classifier_path,
+                                                        expert_top_k=args.expert_top_k)
         all_logs.extend(logs)
         balanced_inputs = maze_inputs + random_inputs
         balanced_gt_actions = maze_gt_actions + random_gt_actions
@@ -128,16 +140,18 @@ def main():
         with open(args.map_path, 'r') as f:
             grid = yaml.safe_load(f)[args.map_name]
         seeds = [args.scenario_seed + i for i in range(args.seeds)]
-        balanced_inputs, balanced_gt_actions, logs = collect_data(seeds=seeds, 
-                                                            env_generator=make_pogema_map_instance, 
-                                                            worker_id=args.worker_id, 
+        balanced_inputs, balanced_gt_actions, logs = collect_data(seeds=seeds,
+                                                            env_generator=make_pogema_map_instance,
+                                                            worker_id=args.worker_id,
                                                             device_id=args.device_id,
-                                                            actions_required=args.file_size // 5, 
+                                                            actions_required=args.file_size // 5,
                                                             dagger_type=args.dagger_type,
                                                             on_target="nothing",
                                                             path_to_weights=args.path_to_weights,
-                                                            num_agents=num_agents, 
-                                                            grid=grid)
+                                                            num_agents=num_agents,
+                                                            grid=grid,
+                                                            segment_classifier_path=args.segment_classifier_path,
+                                                            expert_top_k=args.expert_top_k)
         all_logs.extend(logs)
         filepath = f"{args.dataset_path}/data_{args.worker_id}_{args.scenario_seed}.arrow"
         save_to_arrow(balanced_inputs[:args.file_size], balanced_gt_actions[:args.file_size], filepath)
