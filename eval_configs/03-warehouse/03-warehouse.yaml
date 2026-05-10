@@ -142,16 +142,16 @@ environment:
   map_name: wfi_warehouse
 
 algorithms:
-  MAPF-GPT-2M:
+  Original:
     name: MAPF-GPT
     parallel_backend: balanced_dask
     num_process: 4
-    path_to_weights: weights/model-2M.pt
-  MAPF-GPT-6M:
+    path_to_weights: checkpoints/original/ckpt_ddg_1500.pt
+  Baseline:
     name: MAPF-GPT
     parallel_backend: balanced_dask
     num_process: 4
-    path_to_weights: weights/model-6M.pt
+    path_to_weights: checkpoints/baseline/ckpt_ddg_1500.pt
 
 results_views:
   TabularView1:
