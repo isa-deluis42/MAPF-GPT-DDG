@@ -142,16 +142,16 @@ environment:
       ]
 
 algorithms:
-  MAPF-GPT-2M:
+  Original:
     name: MAPF-GPT
     parallel_backend: balanced_dask
     num_process: 4
-    path_to_weights: weights/model-2M.pt
-  MAPF-GPT-DDG-2M:
+    path_to_weights: checkpoints/original/ckpt_ddg_1500.pt
+  Random:
     name: MAPF-GPT
     parallel_backend: balanced_dask
     num_process: 4
-    path_to_weights: weights/model-2M-DDG.pt
+    path_to_weights: checkpoints/baseline/ckpt_ddg_1500.pt
 
 results_views:
   TabularView1:
