@@ -18,12 +18,21 @@ Four-stage workflow (controlled by --annotations):
 Stages 3 and 4 reuse --annotations: load_annotations auto-detects the
 elicitation list format produced by query.py.
 
+Stages 2/3/4 also support a two-phase fine-tune mode (--human-only): the
+train set is restricted to rollouts with human labels and auto pairs are
+disabled. Pair with --init-from <stage1.pt> so the auto-trained backbone
+is fine-tuned on pure human signal instead of being diluted by ~99% auto
+pairs.
+
 Usage:
-    python train_segment_classifier.py \
-        --data dataset/held_out \
-        --output out/segment_classifier.pt \
-        --annotations annotations.json \
-        --epochs 30
+    # Stage 1 (auto only)
+    python train_segment_classifier.py --data dataset/held_out \\
+        --output out/stage1.pt --epochs 30
+
+    # Stages 2/3/4 (two-phase fine-tune)
+    python train_segment_classifier.py --data dataset/held_out \\
+        --output out/stage2.pt --annotations annotations.json \\
+        --human-only --init-from out/stage1.pt --epochs 30
 """
 
 import argparse
@@ -274,12 +283,14 @@ class SegmentPairDataset(Dataset):
         augment: bool = False,
         context_segments: int = 1,
         human_overrides: Optional[Dict[str, List[Tuple[int, int]]]] = None,
+        human_only: bool = False,
     ):
         self.episodes = []
         self.pairs: List[Tuple[int, int, int, float]] = []  # (ep_idx, seg_i, seg_j, weight)
         self.augment = augment
         self.context_segments = context_segments
         human_overrides = human_overrides or {}
+        self.human_only = human_only
         self.n_overridden = 0  # episodes whose pair list got replaced by human pair(s)
         self.n_human_pairs = 0  # total human-pair training items added
 
@@ -287,6 +298,15 @@ class SegmentPairDataset(Dataset):
             data = np.load(str(path), allow_pickle=True)
             if int(data["map_seed"]) not in map_seed_filter:
                 continue
+
+            path_key = resolve_path(path)
+            has_human = path_key in human_overrides
+
+            # Two-phase fine-tune mode: skip episodes without human labels
+            # entirely (no auto pairs anywhere in the train set).
+            if human_only and not has_human:
+                continue
+
             ep_idx = len(self.episodes)
             self.episodes.append({
                 "obstacles": data["obstacles"],
@@ -295,13 +315,12 @@ class SegmentPairDataset(Dataset):
                 "segment_diffs": data["segment_diffs"],
             })
 
-            # Option B: if this exact rollout has human verdict(s), replace its
-            # auto-generated pairs with the human pair(s). The override key is
-            # the resolved absolute path, so the same scenario_id labeled at
+            # If this exact rollout has human verdict(s), use the human pair(s)
+            # instead of the auto-generated ones. The override key is the
+            # resolved absolute path, so the same scenario_id labeled at
             # different checkpoints (e.g. ckpt_500/X vs ckpt_1500/X) only
             # overrides the rollout the human actually watched.
-            path_key = resolve_path(path)
-            if path_key in human_overrides:
+            if has_human:
                 S = len(data["segment_diffs"]) - (context_segments - 1)
                 added_any = False
                 for wi, ci in human_overrides[path_key]:
@@ -480,7 +499,19 @@ def main():
                              "Eval-only — never used as training overrides. Adds a separate "
                              "'val-map' human metric each epoch (pairwise + argmax accuracy) and "
                              "saves a best-by-val-map-pairwise checkpoint as {stem}.val_map_human.pt.")
+    parser.add_argument("--human-only", action="store_true",
+                        help="Two-phase fine-tune mode: train only on human-labeled pairs. "
+                             "Drops episodes without annotations from the train set and disables "
+                             "auto pair generation entirely, so 100%% of gradient signal comes "
+                             "from human labels. Requires --annotations; pair with --init-from "
+                             "<stage1.pt> to fine-tune the auto-trained backbone.")
     args = parser.parse_args()
+
+    if args.human_only and not args.annotations:
+        parser.error("--human-only requires --annotations (no human labels = no train pairs)")
+    if args.human_only and not args.init_from:
+        print("⚠ --human-only without --init-from: fine-tuning from scratch on a tiny "
+              "human-only dataset will likely underfit. Consider passing a Stage 1 ckpt.")
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
 
@@ -526,17 +557,30 @@ def main():
         episode_paths, TRAIN_MAP_SEEDS,
         augment=True, context_segments=args.context_segments,
         human_overrides=train_annotations or None,
+        human_only=args.human_only,
     )
     val_dataset = SegmentPairDataset(
         episode_paths, VAL_MAP_SEEDS,
         augment=False, context_segments=args.context_segments, human_overrides=None,
     )
+    if len(train_dataset) == 0:
+        raise SystemExit(
+            "Train dataset is empty. "
+            + ("--human-only mode but no TRAIN_MAP_SEEDS rollout has human labels."
+               if args.human_only else "Check --data and seed filters.")
+        )
     print(f"Train pairs: {len(train_dataset)}  |  Val pairs: {len(val_dataset)}")
     if args.annotations:
-        print(
-            f"  ↳ {train_dataset.n_overridden} train episodes had auto pairs replaced "
-            f"by {train_dataset.n_human_pairs} human pair(s) total"
-        )
+        if args.human_only:
+            print(
+                f"  ↳ Two-phase: {train_dataset.n_human_pairs} human pair(s) from "
+                f"{train_dataset.n_overridden} rollouts (auto pairs disabled)"
+            )
+        else:
+            print(
+                f"  ↳ {train_dataset.n_overridden} train episodes had auto pairs replaced "
+                f"by {train_dataset.n_human_pairs} human pair(s) total"
+            )
 
     if args.dry_run:
         from collections import Counter
