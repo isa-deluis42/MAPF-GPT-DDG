@@ -228,7 +228,7 @@ if init_from == "scratch":
 elif init_from == "resume":
     logger.info(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    checkpoint_files = glob.glob(f"out/ckpt_{dagger_type}_*0.pt")
+    checkpoint_files = glob.glob(os.path.join(out_dir, f"ckpt_{dagger_type}_*0.pt"))
     if checkpoint_files:
         ckpt_path = max(checkpoint_files, key=lambda x: int(x.split('_')[-1].split('.')[0]))
     else:
@@ -380,7 +380,8 @@ while True:
                 torch.save(checkpoint, os.path.join(out_dir, f"ckpt_{dagger_type}_{iter_num}.pt"))
                 if dagger_type != 'standard':
                     run_dagger(dagger_type, num_workers, device_id, seed*num_workers, file_size, size_min=size_min, size_max=size_max,
-                               segment_classifier_path=segment_classifier_path, expert_top_k=expert_top_k)
+                               segment_classifier_path=segment_classifier_path, expert_top_k=expert_top_k,
+                               out_dir=out_dir)
                     seed += 1000
 
     if iter_num % eval_interval == 0:

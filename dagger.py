@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import glob
 
 def run_dagger(dagger_type, num_workers, device_id, seed, file_size, size_min=17, size_max=21, run_infinite=False,
-               segment_classifier_path=None, expert_top_k=None):
+               segment_classifier_path=None, expert_top_k=None, out_dir="out"):
     extra = ""
     if segment_classifier_path:
         extra += f" --segment_classifier_path {segment_classifier_path}"
@@ -18,12 +18,12 @@ def run_dagger(dagger_type, num_workers, device_id, seed, file_size, size_min=17
             subprocess.run(f"python worker.py --worker_id {worker_id} --device_id {device_id} --map_seed {0} --scenario_seed {seed + worker_id * 1000} --dataset_path {path_to_dataset} --dagger_type {dagger_type} --path_to_weights {path_to_weights} --num_agents {','.join(map(str, [32, 64, 96, 128, 160, 192]))} --file_size {file_size}{extra}", shell=True)
         else:
             subprocess.run(f"python worker.py --worker_id {worker_id} --device_id {device_id} --map_seed {seed + worker_id * 1000} --scenario_seed {0} --dataset_path {path_to_dataset} --dagger_type {dagger_type} --path_to_weights {path_to_weights} --file_size {file_size} --size_min {size_min} --size_max {size_max}{extra}", shell=True)
-    
-    path_to_weights = f"out/ckpt_{dagger_type}.pt"
+
+    path_to_weights = os.path.join(out_dir, f"ckpt_{dagger_type}.pt")
     path_to_dataset = f"dataset/{dagger_type}"
     ToolboxRegistry.setup_logger('INFO')
     while True:
-        checkpoint_files = glob.glob(f"out/ckpt_{dagger_type}_*0.pt")
+        checkpoint_files = glob.glob(os.path.join(out_dir, f"ckpt_{dagger_type}_*0.pt"))
         if dagger_type == 'dagger' or dagger_type == 'ddg':
             checkpoint_files = [f for f in checkpoint_files if 'warehouse' not in f]
         if checkpoint_files:
@@ -48,9 +48,11 @@ def main():
                         help='Path to segment classifier checkpoint. When set, the ranker selects which segment runs the full LaCAM (replacing fast LaCAM probes).')
     parser.add_argument('--expert_top_k', type=int, default=None,
                         help='Top-K env gate for segment-ranker mode: only the K envs per batch with the highest top-segment score get the full LaCAM. None means no gate.')
+    parser.add_argument('--out_dir', type=str, default='out',
+                        help='Directory holding ckpt_{dagger_type}_*.pt checkpoints (default: %(default)s)')
     args = parser.parse_args()
     run_dagger(args.dagger_type, args.num_workers, args.device_id, args.seed, args.file_size, size_min=args.size_min, size_max=args.size_max, run_infinite=args.run_infinite,
-               segment_classifier_path=args.segment_classifier_path, expert_top_k=args.expert_top_k)
+               segment_classifier_path=args.segment_classifier_path, expert_top_k=args.expert_top_k, out_dir=args.out_dir)
 
 if __name__ == '__main__':
     main()
