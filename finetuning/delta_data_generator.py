@@ -315,7 +315,7 @@ def fast_solver_delta(envs, learnable_algo, fast_solver, solver, cfg: FastSolver
             gt_actions.extend(filtered_data['gt_actions'])
             expert_logs[result[2]['map_name']] = result[2]
         else:
-            ToolboxRegistry.debug('No expert results for env', env.grid.config.map_name)
+            ToolboxRegistry.debug('No expert results for env')
     if cfg.save_debug_svg:
         for env, unroll_steps in envs_with_positive_diffs:
             create_svg(env, unroll_steps)
