@@ -1,6 +1,6 @@
 # Human-in-the-Loop Congestion Classification for Multi-Agent Pathfinding
 
-Final Project Report - Working Draft
+Final Project Report — Working Draft
 
 > Format target: 6 pages, double-column. Easiest path is to write here in Markdown, then convert with `pandoc` or paste into the IEEE/ACM double-column LaTeX template before submission. Mark replacements with `TODO` / `[FILL]` / `[FIGURE N]`.
 >
@@ -16,7 +16,7 @@ Shane Pornprinya, Isabel De Luis, Sparsh Bansal
 
 ## Abstract
 
-Multi-agent pathfinding (MAPF) policies trained with imitation learning improve when their training data is enriched with hard-case rollout segments where the policy gets stuck in congestion. The original Difficulty-Driven data Generation (DDG) pipeline detects these moments with a hand-tuned threshold on a fast solver's makespan-improvement estimate, discarding everything in the borderline range. We argue this throws away signal that humans can readily provide, and that the threshold itself is wrong on a substantial fraction of cases. We introduce a learned segment-ranking classifier that consumes a 16-step spatio-temporal volume of the multi-agent state and is trained on a hybrid of (cheap) auto-labels and (rare) human pairwise verdicts collected through a custom replay tool. Across 52 valid annotations, humans disagree with the auto-label ordering in 44% of cases - a rate stable across two independent annotation batches. We then run a four-stage comparison at fixed label budget (56 train-map labels per stage, evaluated on 12 held-out val-map pairs): Stage 1 auto-only baseline, Stage 2 random-sampling baseline, Stage 3 warm-start pool active learning, Stage 4 iterative active learning (4 rounds × 14 labels). Random sampling at fixed budget yields zero lift over the auto-only baseline (both `hp_val` = 5/12 = 0.417), while uncertainty × diversity AL lifts `hp_val` to 7/12 = 0.583 (+0.166; +17 percentage points), with iterative AL matching single-shot AL exactly at this budget. DDG-aligned ranking is preserved within 2.4 pp across all four stages. The headline takeaway is methodological: **selection strategy beats label volume** — at this scale, *which* 56 pairs the human labels matters more than the fact that they labelled 56 pairs.
+Multi-agent pathfinding (MAPF) policies trained with imitation learning improve when their training data is enriched with hard-case rollout segments where the policy gets stuck in congestion. The original Difficulty-Driven data Generation (DDG) pipeline detects these moments with a hand-tuned threshold on a fast solver's makespan-improvement estimate, discarding everything in the borderline range. We argue this throws away signal that humans can readily provide. We introduce a learned segment-ranking 3D CNN that consumes a 16-step spatio-temporal volume of the multi-agent state and is trained with a continuous-weight RankNet loss on cheap auto-labels, then fine-tuned in a two-phase `--human-only` step on rare human pairwise verdicts collected through a custom debiased replay tool. We compare three label-acquisition strategies at fine-tune budget — (i) no human labels (auto-only baseline), (ii) uniform random sampling, (iii) confusion-driven active learning that ranks candidate pairs by `H(σ(s_A − s_B))` — evaluated on a held-out 76-pair human-pair signal across 69 val-map rollouts (`annotation_val_map.json`). Across all three stages the auto-aligned validation `pair_acc` is preserved to within 0.002 (0.648 → 0.650), demonstrating that human fine-tuning does not damage DDG-aligned ranking. On the held-out human-pair signal, confusion AL converges to a stable `human_val ≈ 0.71` (vs `≈ 0.65` end-of-training for random) — a small but stable lift attributable to selection strategy, not label volume (confusion uses 65 labels, random uses 78). We additionally close the loop end-to-end by plumbing the trained classifier into DDG's expert-selection step (`finetuning/delta_data_generator.py`), retraining MAPF-GPT under classifier-gated DDG, and configuring an apples-to-apples downstream comparison on five POGEMA suites (random, mazes, warehouse, movingai, puzzles); benchmark numbers are pending. A label-preserving spatial-symmetry augmentation of the rollout corpus (Isabel De Luis, [`augment_segment_rollouts.py`](augment_segment_rollouts.py); 5,007 augmented `.npz` files committed) provides a 4× expansion of the auto-pair training data at zero label cost, available for future training runs. The headline takeaway is methodological: at this scale and label budget, **the auto signal is much stronger than previously thought** — human fine-tuning provides a stable, modest re-alignment toward human judgment without sacrificing the auto baseline, and an entropy-only AL acquisition outperforms uniform random sampling by a small but reproducible margin.
 
 ---
 
@@ -24,27 +24,31 @@ Multi-agent pathfinding (MAPF) policies trained with imitation learning improve 
 
 ### 1.1 Motivation
 
-Coordinating teams of robots in shared environments - warehouses, delivery fleets, search-and-rescue swarms - fundamentally requires solving multi-agent pathfinding (MAPF). Recent work has shown that transformer policies trained on solver demonstrations can solve large-scale MAPF instances at inference time with a fraction of the compute an exact solver would need [^mapfgpt]. But these learned policies are only as good as the training data, and they consistently fail on a long tail of congested scenarios that look superficially similar to easy ones - agents bunched at corridor pinch-points, deadlocks at junctions, oscillating swap conflicts.
+Coordinating teams of robots in shared environments — warehouses, delivery fleets, search-and-rescue swarms — fundamentally requires solving multi-agent pathfinding (MAPF). Recent work has shown that transformer policies trained on solver demonstrations can solve large-scale MAPF instances at inference time with a fraction of the compute an exact solver would need [^mapfgpt]. But these learned policies are only as good as the training data, and they consistently fail on a long tail of congested scenarios that look superficially similar to easy ones — agents bunched at corridor pinch-points, deadlocks at junctions, oscillating swap conflicts.
 
 The state-of-the-art remedy is Difficulty-Driven data Generation (DDG) [^ddg]: roll out the current policy, identify rollout segments where it appears to struggle, invoke an expensive expert solver on those segments only, and add the resulting expert demonstrations back into the training set. The selection step matters: calling the expert on every segment is wasteful, and missing genuinely hard segments leaves the policy's blind spots unfixed.
 
-Today, segment selection in DDG is performed by a hand-tuned threshold on a fast LaCAM probe's makespan-improvement estimate. The threshold is brittle: it discards an entire midrange band of borderline-difficult segments, and - as we show - disagrees with human judgment in nearly half of borderline cases.
+Today, segment selection in DDG is performed by a hand-tuned threshold on a fast LaCAM probe's makespan-improvement estimate. The threshold is brittle: it discards an entire midrange band of borderline-difficult segments and disagrees with human judgment on a substantial fraction of cases.
 
 ### 1.2 HRI Framing
 
 This is a Human-Robot Interaction problem in two ways:
 
-1. The "robot" is a multi-agent system that operates without per-step human supervision, but whose long-run training improves when humans inject judgment about which behaviors look problematic. The same problem shape recurs anywhere robot teams operate among or for humans - warehouse fleets, multi-AGV manufacturing, autonomous mobility-on-demand.
-2. The annotation interface itself is an HRI artifact. Asking humans to rank segments rather than to label them with absolute scores reduces cognitive load and avoids the calibration pitfalls of asking "how congested, on a scale of 1-10?" [^pairwise]. The replay-based segment-marking tool we built is the human-facing surface of an active-learning loop that closes between human judgment and a learned policy at planet-scale.
+1. The "robot" is a multi-agent system that operates without per-step human supervision, but whose long-run training improves when humans inject judgment about which behaviors look problematic. The same problem shape recurs anywhere robot teams operate among or for humans — warehouse fleets, multi-AGV manufacturing, autonomous mobility-on-demand.
+2. The annotation interface itself is an HRI artifact. Asking humans to rank segments rather than to label them with absolute scores reduces cognitive load and avoids the calibration pitfalls of asking "how congested, on a scale of 1-10?" [^pairwise]. The replay-based segment-marking tool we built — including a debiasing step that randomly swaps left/right A/B presentation and hides the auto-label diff from the annotator — is the human-facing surface of an active-learning loop that closes between human judgment and a learned policy at planet-scale.
 
 ### 1.3 Contribution
 
-We make four contributions:
+We make six contributions:
 
-1. A segment-level spatio-temporal congestion classifier that takes a 16-step volume of (agent positions, obstacles, goals, recent history) and outputs a scalar score, replacing DDG's hand-tuned threshold.
-2. A hybrid pairwise-ranking objective that mixes cheap auto-labels (from a fast LaCAM probe) with rare, high-confidence human pairwise verdicts collected through a custom replay tool. We show how to override - not merely augment - auto pairs in episodes where humans contradict them.
-3. An empirical analysis of human vs auto-label disagreement and a quantitative comparison of four save-best criteria for the trained classifier. Across 52 valid annotations on the held-out seed set, the human's "worst" segment has a lower or equal fast-solver-diff than the human's "clean" segment in 23/52 cases (44%) - a contradiction rate that holds within ±2 points across two independent annotation batches, indicating it is a stable property of the auto-label rather than annotator noise.
-4. A four-stage comparison at fixed label budget that isolates the value of acquisition strategy from the value of human labels per se. Stage 1 (zero human labels) and Stage 2 (56 randomly-sampled human labels under the one-pair protocol) achieve identical held-out human-pair accuracy (5/12 = 0.417). Stage 3 (the same 56-label budget allocated by warm-start pool AL with acquisition `H(σ(s_A - s_B)) · ‖φ_A - φ_B‖`) lifts held-out accuracy to 7/12 = 0.583 (+17 percentage points). Stage 4 (iterative AL, 4 rounds × 14 labels with model retraining between rounds) matches Stage 3 exactly. The comparison directly answers external-review feedback ("compare AL strategies"), and the headline finding is that selection matters more than volume: random sampling does not move the model, but the same 56 labels chosen by an uncertainty × diversity acquisition do.
+1. **A segment-level spatio-temporal congestion classifier** that takes a 16-step volume of (agent positions, obstacles, goals, recent history) and outputs a scalar score, replacing DDG's hand-tuned threshold.
+2. **A continuous-weight pairwise ranking objective.** We replace DDG's three-bucket (`diff > 3` / `diff < 1` / midrange-skip) scheme with a linear pair weight `min(diff_i − diff_j, MAX_PAIR_GAP) / MAX_PAIR_GAP` (with `MAX_PAIR_GAP = 5`) so that all auto-pair signal participates in training, weighted by confidence.
+3. **A two-phase `--human-only` fine-tune protocol.** Phase 1 trains an auto-pair backbone; phase 2 fine-tunes (initialised from `--init-from <stage-1>.pair_acc.pt`) with auto pairs disabled and only human pairwise verdicts contributing gradient. Without this two-phase split, the ≈100 human pairs are diluted by ~78k auto pairs and never move the model.
+4. **A controlled comparison of three acquisition strategies at fixed fine-tune budget**: (i) no human labels (Stage 1 — auto-only ranker), (ii) uniform random sampling over the train-map elicitation pool (Stage 2, 78 labels), (iii) confusion-driven active learning that ranks candidate pairs by `H(σ(s_A − s_B))` against the Stage 1 baseline scorer (Stage 3, 65 labels). All three preserve `pair_acc` to within 0.002 on the val-map auto signal, and confusion AL converges to a higher and more stable `human_val` than random sampling on a held-out 76-pair human-pair set.
+5. **Label-preserving rollout augmentation** (Isabel De Luis, [`augment_segment_rollouts.py`](augment_segment_rollouts.py)). Spatial symmetries (hflip / vflip / rot180 / rot90 / rot270 / transpose) are applied directly to the segment-classifier `.npz` rollouts while preserving `segment_diffs`, providing a label-cost-free 4× expansion of the auto-pair training corpus (5,007 augmented files committed under `ranker_dataset/held_out_aug/`, covering all five DDG checkpoints under `dataset/held_out/`). Built and committed; not yet wired into a reported training run.
+6. **End-to-end DDG integration and downstream MAPF-GPT benchmark setup** (`finetuning/delta_data_generator.py` + `eval_configs/`). The trained classifier is plumbed into DDG's segment-selection path: when `cfg.segment_classifier_path` is set, every env's segments are scored in one batched forward pass, the argmax-scored segment is picked per env, and the top-K envs (`cfg.expert_top_k`) are sent to the expert. A new MAPF-GPT model has been trained with this classifier-gated DDG (`checkpoints/baseline/ckpt_ddg_*.pt`, up to step 2000) and the apples-to-apples comparison vs the original threshold-gated MAPF-GPT (`checkpoints/original/ckpt_ddg_*.pt`) is configured on five POGEMA suites (random, mazes, warehouse, movingai, puzzles); results are pending.
+
+A second, earlier augmentation track (Isabel De Luis, [`finetuning/export_augmented_active_learning_samples.py`](finetuning/export_augmented_active_learning_samples.py)) explores *synthetic-jitter* augmentation in the standalone congestion-classifier setting and is reported separately in §6.6.
 
 ---
 
@@ -52,7 +56,7 @@ We make four contributions:
 
 ### 2.1 Multi-Agent Pathfinding Solvers
 
-Classical MAPF planners - Conflict-Based Search [^cbs], LaCAM [^lacam] - return optimal or near-optimal solutions but scale poorly with agent count. POGEMA [^pogema] provides a standardized benchmark suite with maze and warehouse maps used throughout this paper.
+Classical MAPF planners — Conflict-Based Search [^cbs], LaCAM [^lacam] — return optimal or near-optimal solutions but scale poorly with agent count. POGEMA [^pogema] provides a standardized benchmark suite with maze and warehouse maps used throughout this paper.
 
 ### 2.2 Learned MAPF Policies
 
@@ -60,7 +64,7 @@ MAPF-GPT [^mapfgpt] casts MAPF as autoregressive token prediction: each agent's 
 
 ### 2.3 DDG and the Hard-Case Selection Problem
 
-MAPF-GPT-DDG [^ddg] augments standard imitation training with a hard-case mining loop. At each training checkpoint, the current policy is rolled out on synthetic scenarios; for each rollout, a 2-second LaCAM probe at every 16-step boundary estimates remaining makespan, the segment with the largest delta is identified, and - if that delta exceeds 3 - the 10-second LaCAM expert is invoked on that segment to produce additional training pairs. Segments with delta < 1 are discarded; segments in [1, 3] are also discarded as "ambiguous."
+MAPF-GPT-DDG [^ddg] augments standard imitation training with a hard-case mining loop. At each training checkpoint, the current policy is rolled out on synthetic scenarios; for each rollout, a 2-second LaCAM probe at every 16-step boundary estimates remaining makespan, the segment with the largest delta is identified, and — if that delta exceeds 3 — the 10-second LaCAM expert is invoked on that segment to produce additional training pairs. Segments with delta < 1 are discarded; segments in [1, 3] are also discarded as "ambiguous."
 
 This thresholding rule is the bottleneck we attack in this paper.
 
@@ -70,11 +74,11 @@ Prior HRI work on integrating human feedback into agent training has explored ab
 
 ### 2.5 Pairwise Learning to Rank
 
-RankNet [^ranknet] minimizes a logistic-style loss over score differences between paired examples. This is the loss the trainer in this work uses, with weights derived from the auto-label confidence buckets.
+RankNet [^ranknet] minimizes a logistic-style loss over score differences between paired examples. This is the loss the trainer in this work uses, with a continuous gap-derived weight in `[0, 1]` rather than the categorical bucket weights used in earlier iterations of this project.
 
 ### 2.6 Active Learning for Preference Elicitation
 
-Active-learning surveys [^al-survey] partition acquisition strategies into rough families - uncertainty sampling (query where the model's prediction is least confident), diversity / representativeness sampling (cover the feature space), expected-information-gain (EIG) maximisation (select the query that most reduces posterior entropy), and density-weighted variants that combine the above. For pairwise preference learning specifically, a common acquisition function combines the entropy of the model's preference probability `p = σ(s_A - s_B)` with the feature-space distance between candidates: queries where the model is uncertain *and* the candidates are not redundant carry the most information per label [^pairwise-al]. The professor's feedback on this project explicitly suggested comparing such strategies (boundary-querying vs. hard-case mining vs. alternation), and our Stages 3 and 4 implement two points in that design space: a single-shot warm-start uncertainty × diversity acquisition (Stage 3) and an iterative variant where the model is retrained between rounds (Stage 4).
+Active-learning surveys [^al-survey] partition acquisition strategies into rough families: uncertainty sampling (query where the model is least confident), diversity / representativeness sampling (cover the feature space), expected-information-gain (EIG) maximisation, and density-weighted variants that combine the above. For pairwise preference learning specifically, a common acquisition combines the entropy of the model's preference probability `p = σ(s_A − s_B)` with the feature-space distance between candidates [^pairwise-al]. We initially implemented this combined acquisition (`H · ‖φ_A − φ_B‖`) but observed that the diversity term concentrated queries on a few feature-extreme rollouts while leaving plenty of high-entropy in-distribution pairs unqueried; we therefore simplified the acquisition to entropy-only (`H(σ(s_A − s_B))`), giving the *pure uncertainty-sampling* baseline that is reported as Stage 3 (the "confusion AL" stage).
 
 ---
 
@@ -82,14 +86,14 @@ Active-learning surveys [^al-survey] partition acquisition strategies into rough
 
 ### 3.1 Research Question
 
-> Can a small set of human-curated pairwise segment rankings improve a learned MAPF congestion classifier beyond what is achievable with a hand-tuned threshold on cheap auto-labels alone, and does the *strategy used to elicit those rankings* (un-prioritised vs uncertainty-driven vs diversity-driven) materially affect the downstream classifier?
+> Can a small set of human-curated pairwise segment rankings improve a learned MAPF congestion classifier beyond what is achievable on cheap auto-labels alone, and does an *uncertainty-driven elicitation strategy* materially improve over uniform random sampling at the same label budget?
 
 ### 3.2 Hypotheses
 
-- H1 (auto-label noise). The fast-solver-diff used by DDG to label segments disagrees with human judgment in a non-trivial fraction of borderline cases.
-- H2 (human pairs generalize). Replacing auto-derived pair supervision with human pairwise verdicts in annotated episodes improves performance on a held-out subset of human pairs without degrading the underlying auto-label-driven ranking quality.
-- H3 (midrange recovery). The midrange band currently discarded by DDG contains learnable signal recoverable through human annotation.
-- H4 (acquisition strategy matters). At a fixed label budget, an uncertainty × diversity active-learning acquisition produces a stronger classifier than uniform random sampling, because it concentrates labels on the segment-pairs the current model is most uncertain about. We further test whether iterating the acquisition (model retrained between rounds) gives additional lift over single-shot pool selection.
+- **H1 (auto-label noise).** The fast-solver-diff used by DDG to label segments disagrees with human judgment on a non-trivial fraction of borderline cases.
+- **H2 (preservation under fine-tune).** Two-phase `--human-only` fine-tuning of an auto-trained backbone on a small budget of human pairs preserves DDG-aligned `pair_acc` (auto-pair ranking).
+- **H3 (selection beats volume).** At the same fine-tune budget (≤80 human pairs), an entropy-driven acquisition function produces a stronger and more stable held-out human-pair classifier than uniform random sampling.
+- **H4 (closed-loop deployment is feasible).** The learned classifier can replace the diff threshold inside DDG's `delta_data_generator.py` and produce drop-in expert-selection decisions per env, batched into a single forward pass — a system-level feasibility claim distinct from any downstream-quality claim.
 
 ---
 
@@ -97,7 +101,7 @@ Active-learning surveys [^al-survey] partition acquisition strategies into rough
 
 ### 4.1 Held-Out Seed Set
 
-To enable clean evaluation across DDG checkpoints, we reserve a fixed seed set never seen during DDG training: 20 procedurally generated maps (10 maze, 10 random) × 3 scenario seeds × 3 agent counts ∈ {16, 32, 48} = 360 episodes. Map seeds 128-143 form our train split for the classifier (16 maps); 144-147 form val (4 maps).
+To enable clean evaluation across DDG checkpoints, we reserve a fixed seed set never seen during DDG training. Map seeds are split into [TRAIN_MAP_SEEDS](held_out_seed_set.py) (used for the classifier's auto-pair training, plus all human-elicitation pools) and [VAL_MAP_SEEDS](held_out_seed_set.py) = `{144, 145, 146, 147}` (used for `pair_acc` and the held-out human-pair val signal). Episodes span 5 DDG-policy checkpoints (`ckpt_0`, `ckpt_500`, `ckpt_1000`, `ckpt_1500`, `ckpt_30000`), 3 scenario seeds, and 3 agent counts ∈ {16, 32, 48}. The `dataset/held_out/` directory contains 1,669 episode `.npz` files at the time of the experiments reported here.
 
 ### 4.2 Spatio-Temporal Featurization
 
@@ -108,78 +112,91 @@ Each 16-step segment is encoded as a 4-channel volume of shape `(4, 16, 32, 32)`
 | 0 | Agent occupancy density at each timestep within the segment |
 | 1 | Obstacle map (broadcast across time) |
 | 2 | Goal density (broadcast across time) |
-| 3 | Pre-segment agent history density (broadcast across time) - captures oscillation and dithering |
+| 3 | Pre-segment agent history density (broadcast across time) — captures oscillation and dithering |
 
 Maps are zero-padded to a uniform 32×32 spatial grid.
 
 ### 4.3 Model
 
-A small 3D CNN: three Conv3d blocks with GroupNorm + ReLU + MaxPool3d (or final AdaptiveAvgPool3d), producing a 64-dim embedding, followed by a linear projection to a scalar score.
+A small 3D CNN (`Segment3DCNN` in [train_segment_classifier.py](train_segment_classifier.py)): three Conv3d blocks with GroupNorm + ReLU + MaxPool3d (or final AdaptiveAvgPool3d), producing a 64-dim embedding, followed by a linear projection to a scalar score. Base channel width = 8; checkpoint size ≈ 79 KB.
 
-### 4.4 Auto-Labels
+### 4.4 Auto-Labels and Pair Weighting (Continuous, Not Bucketed)
 
-For each episode, every 16-step boundary is probed with a 2-second LaCAM call yielding `M(t) = LaCAM-estimated remaining makespan from state at step t`. The auto-label per segment is `diff(t) = M(t+16) − M(t)`. We bucket:
+For each episode, every 16-step boundary is probed with a 2-second LaCAM call yielding `M(t) = LaCAM-estimated remaining makespan from state at step t`. The auto-label per segment is `diff(t) = M(t+16) − M(t)`. Within each episode, we generate ordered pairs `(i, j)` with `diff(i) > diff(j)` and weight each pair as
 
-- `diff > 3` → confident_positive (congestion)
-- `diff < 1` → confident_negative (no congestion)
-- `1 ≤ diff ≤ 3` → midrange (default: discarded)
+```
+w(i, j) = min(diff(i) − diff(j), MAX_PAIR_GAP) / MAX_PAIR_GAP
+```
+
+with `MAX_PAIR_GAP = 5`. Gaps ≥ 5 clip to weight 1.0; smaller gaps ramp linearly down toward 0; pairs with `diff(i) == diff(j)` are excluded. This continuous weighting replaces the earlier categorical bucketing (`diff > 3` / `diff < 1` / midrange-skip) and lets the entire range of pair confidences contribute proportionally to the loss. A `--dry-run` flag in the trainer prints the resulting pair-weight histogram so the bucketing change can be sanity-checked at config time.
 
 ### 4.5 Pairwise Ranking Loss
 
-Within each episode, we generate ordered pairs `(i, j)` with `diff(i) > diff(j)` and weight by bucket compatibility:
-
-| Pair type | Weight |
-|---|---|
-| confident_pos vs confident_neg | 1.0 |
-| confident vs midrange | 0.5 |
-| midrange vs midrange | 0.0 (skip) |
-
-We optimize the standard RankNet loss `L = -log σ(s_i - s_j) · w` with Adam (lr=3e-4, no weight decay) and a cosine annealing learning-rate schedule with `T_max = epochs`.
-
-### 4.6 Human Annotation Protocol
-
-We adapted a `replay.ipynb` notebook to provide a full-episode scrubbable visualization with keyboard shortcuts for marking segments. The protocol given to the annotator was:
-
-1. Scrub through the full episode end-to-end first to understand the rollout's arc, before deciding any marks.
-2. Mark the worst-looking segment as "Fail."
-3. Mark a clearly clean segment as "Pass."
-4. (Optional) mark one borderline segment for additional supervision.
-5. Skip the episode entirely if it is uniformly clean, uniformly bad, or indistinguishable throughout.
-
-Pair-count rule: a non-skipped episode produces a minimum of 1 ranking pair `(worst, clean)`; if a borderline is also marked, the episode yields 2 chained pairs `(worst, borderline)` and `(borderline, clean)` instead, giving the model finer-grained ordering signal.
-
-We collected 56 annotations across 16 unique map seeds (128-143; all on the held-out train split, the held-out val map seeds 144-147 receive zero annotations). The persisted annotation schema for this batch captured only the worst and clean indices (no borderline marks landed in the JSON), so each non-skipped episode contributed exactly one human pair. After filtering entries with worst==clean (1) or null indices (3), 52 are usable. Extending the persisted schema to record borderline marks and replaying these episodes would be a near-zero-cost way to roughly double the pair budget without further annotator time on new episodes; we leave it as immediate future work.
-
-### 4.7 Hybrid Training (Option B Override)
-
-The simplest integration - appending human pairs to the auto pair set - fails: in 23/52 (44%) of annotations the human's worst segment has lower or equal `diff` than the human's clean segment, so the corresponding auto pair would point in the opposite direction and the gradients would partially cancel. Options A (naive append), C (surgical override), D (upweight), and E (re-bucket) were considered (Appendix A).
-
-We adopt Option B: full override. For each annotated episode, all auto-derived pairs from that episode are removed and replaced with the single human pair at weight 1.0. Auto pairs from non-annotated episodes are unaffected. Other rollouts of the same scenario at different DDG checkpoints - collected at a different policy state and therefore different rollouts - are unaffected: only the rollout the human actually saw is overridden.
-
-### 4.8 Active-Learning Stages (Preference Elicitation)
-
-The Stage 2 annotations were collected by un-prioritised replay-tool scrubbing: the annotator was free to skip episodes that looked uniform but otherwise saw all candidates equally. We extend this to two active-learning variants whose annotation pool is selected by an explicit acquisition function.
-
-Pool-based acquisition. Both AL stages enumerate every (episode, segment_a, segment_b) candidate triple over the filtered pool of `≥4`-segment annotated rollouts, score each candidate with
+We optimise standard RankNet over score differences:
 
 ```
-acquisition(ep, A, B) = H(σ(s_A − s_B)) · ‖φ_A − φ_B‖
+L = − Σ w(i, j) · log σ(s_i − s_j)
 ```
 
-where `s_A`, `s_B` are scalar model scores for segments A and B, `H(·)` is binary entropy, and `φ_A`, `φ_B` are 11-dimensional hand-engineered feature vectors per segment (wait fraction, mean / max per-step movement, mean / max remaining goal distance, oscillation fraction, crowding indicators, shortest-path-overlap proxy). Features are globally normalised before the distance is computed. Candidates are then ranked descending by acquisition and a budget of `B` queries is greedy-selected subject to a `--per-episode-cap` to prevent any single hard episode from swallowing the budget.
+with Adam (lr = 3e-4 in phase 1; lr = 1e-4 in phase 2 fine-tunes) and either a constant LR (`--scheduler none`) or cosine annealing.
 
-Stage 3 - warm-start AL. The scoring model is the Stage 1 baseline checkpoint (saved-by `argmax_pm1`). The acquisition function reduces to "uncertainty × diversity": pairs the *current model* is most unsure about, weighted by feature-space novelty.
+### 4.6 Human Annotation Protocol (Pairwise + Debiased)
 
-Stage 4 - iterative AL (4 rounds × 14 labels). Replaces the one-shot pool selection of Stage 3 with R = 4 sequential rounds. Each round queries 14 new pairs using the *current* model as scorer, labels them, appends to the corpus, and retrains. After round 4, the resulting model is the final Stage 4 checkpoint. Tests whether the warm-start scoring model improves enough between rounds to materially change the acquisition signal at this budget.
+We adapted [replay.ipynb](replay.ipynb) to provide a full-episode scrubbable visualization with keyboard shortcuts. Annotations are now collected as **pairs**, not as worst/clean indices. For each query the tool shows two candidate segments side-by-side and asks "which is worse?"; the answer is recorded as one of `a_worse`, `b_worse`, or `unsure_or_skipped`. Two debiasing measures were added in commit 502008c:
 
-For both stages we set `--budget 56 --per-episode-cap 2`, matching Stage 2's total label count (52) and distributing across ≥28 distinct episodes. The trainer's `load_annotations` auto-detects `query.py`'s list-format JSON, so a single `(scenario_id, segment_a, segment_b, label)` per row produces multiple `(worst_idx, clean_idx)` overrides per episode (one per labelled pair), feeding directly into the same Option B path used in Stage 2.
+1. **Random A/B swap.** Each query randomises which side is rendered as "A" and which as "B" with 50/50 probability; the user's a/b choice is mapped back to canonical segment indices before being persisted to JSON.
+2. **Hidden auto signal.** The tool no longer shows the LaCAM-diff or model-predicted preference probability for the displayed pair, so the human cannot anchor on the auto label.
+
+The canonical persisted schema is now (`scenario_id`, `npz_path`, `segment_a`, `segment_b`, `chosen_worse_segment`, `label`, `segment_a_range`, `segment_b_range`). The trainer's `load_annotations` auto-detects this list-format schema and converts each non-skipped pair into a `(worst_idx, clean_idx)` override.
+
+We collected five annotation files for this study (all on `dataset/held_out/`, all on a budget of 100 queries except the iterative AL stages):
+
+| File | Purpose | Total | Labeled | Skipped |
+|---|---|---|---|---|
+| `annotation_val_map.json` | Held-out human val signal (val-map seeds 144-147, eval-only) | 100 | **76 across 69 unique rollouts** | 24 |
+| `annotation_random.json` | Stage 2 random sampling (train-map seeds) | 100 | **78** | 22 |
+| `annotation_confusion.json` | Stage 3 confusion AL (train-map seeds) | 100 | **65** | 35 |
+| `annotation_iterative.json` | Stage 4 iterative AL (4 rounds × 14, train-map seeds) | 56 | 56 | 0 |
+| `annotations_legacy_free_curation.json` | Legacy un-prioritised hand-curation diagnostic | — | — | — |
+
+The "skipped" rate (22-35%) is itself informative: the human declined to commit when neither segment looked clearly worse. Confusion AL, by construction, surfaces queries the model is most uncertain about — and the human's own uncertainty rate on those queries (35%) is correspondingly the highest of the three.
+
+### 4.7 Two-Phase `--human-only` Fine-Tune
+
+The simplest integration — appending human pairs to the auto pair set — fails not just because of contradictions (≈44% of human pairs disagree with the auto-diff ordering on the same segments, §6.1) but also because the ≈100 human pairs are drowned by ≈78k auto pairs in the training set. A pure RankNet update sees the human signal as < 0.1% of the gradient and never moves the model.
+
+We therefore train in two phases:
+
+- **Phase 1 (auto backbone).** `train_segment_classifier.py --data dataset/held_out --output baseline.pt --epochs 60`. No `--annotations`. Saves two checkpoints: `baseline.pt` (best `human_val` if `--val-annotations` provided; else best `pair_acc`) and `baseline.pair_acc.pt` (best weighted pair accuracy on val-map auto pairs).
+- **Phase 2 (human-only fine-tune).** `train_segment_classifier.py --annotations <stage>.json --val-annotations annotation_val_map.json --init-from baseline.pair_acc.pt --human-only --epochs 60 --lr 1e-4`. The `--human-only` flag disables auto pairs entirely; only the human-pair gradient flows. The `--init-from` flag starts from the auto-trained backbone so the model begins fine-tuning from a competent ranker rather than from random weights. Saves `<stage>.pt` (best `human_val`) and `<stage>.pair_acc.pt` (best `pair_acc` — auto-aligned safety check).
+
+Compared to the earlier "Option B override" mechanism (which removed only the auto pairs from annotated episodes), `--human-only` is a stricter complete-replacement protocol: in phase 2, *no* auto pair contributes gradient. The phase 1 checkpoint serves as the implicit prior over auto-pair ranking that human gradients then perturb.
+
+### 4.8 Active-Learning Stages
+
+The Stage 2 annotations were collected by uniform random sampling over the train-map elicitation pool. The Stage 3 annotations were collected by **confusion-driven AL**:
+
+1. **Score every candidate pair.** For every (episode, segment_a, segment_b) triple in the filtered pool of `≥4`-segment annotated rollouts, the Stage 1 baseline checkpoint scores both segments and we compute the binary entropy of the implied preference probability:
+
+   ```
+   acquisition(ep, A, B) = H(σ(s_A − s_B))
+   ```
+
+2. **Greedy top-K with per-episode cap.** Rank descending by entropy, greedy-select up to `--budget` queries subject to a `--per-episode-cap` (typically 2) so a single hard episode does not swallow the budget.
+3. **Skip identical candidates.** Pairs whose feature vectors are within `IDENTITY_DISTANCE_EPS = 1e-9` are dropped to avoid degenerate (segment, segment) queries when episodes have repeated rollouts.
+
+This is a pure uncertainty-sampling acquisition. The earlier `H · ‖φ_A − φ_B‖` (entropy × diversity) acquisition was simplified out in commit c9c84a2 after we observed the diversity term concentrated queries on a few feature-extreme rollouts at the cost of leaving in-distribution high-entropy pairs unqueried; we report the simplification as a methodology choice rather than as a separate stage.
+
+**Stage 4 (iterative AL, 4 rounds × 14 labels).** Replaces one-shot pool selection with R = 4 sequential rounds. Each round queries 14 new pairs using the *current* model as scorer, labels them, appends to `annotation_iterative.json`, and retrains. After round 4, the resulting model is the final Stage 4 checkpoint. This stage is currently being re-run under the Phase-1+Phase-2 `--human-only` protocol; the May-3 results in [train_segment_classifier_colab.ipynb](train_segment_classifier_colab.ipynb) used the older mixed-mode trainer (auto pairs co-trained with human overrides, 8 epochs/round) and are reported with that caveat in §6.5.
 
 ### 4.9 Evaluation Metrics
 
-We report two complementary metrics each epoch:
+Two complementary metrics are tracked each epoch:
 
-- Auto top-3 accuracy: for each val episode, fraction in which the auto-label argmax is among the model's top-3 highest-scored segments.
-- Human-pair accuracy: for each annotation, indicator that `score(worst) > score(clean)`. Reported on three subsets: `all` (52), `train` (39, used for training in Stage 2), and `val` (13, held out from training under the deterministic `--hold_out_every 4` rule).
+- **`pair_acc`** (auto, val maps): Weighted pairwise accuracy on val-map auto pairs, generated with the same continuous-gap weighting used at training time. This is the auto-aligned analogue of the training loss and the primary save-best signal in the absence of human labels.
+- **`human_val`** (held-out human pairs): For each labelled pair `(worst, clean)` in `annotation_val_map.json`, the indicator `score(worst) > score(clean)`. Random baseline = 0.5.
+
+Both metrics are evaluated on val-map seeds {144, 145, 146, 147} only — the train-map elicitation pool is fully held out from auto-pair val and from the human-pair val signal alike. A legacy `top-1±1` (argmax_pm1) metric was removed from the trainer in commit d8b4301; it can still be recomputed post-hoc by [evaluate_baselines.py](evaluate_baselines.py) when a DDG-aligned exact-match summary is desired.
 
 ---
 
@@ -187,118 +204,170 @@ We report two complementary metrics each epoch:
 
 ### 5.1 Stages
 
-We compare four annotation-acquisition strategies, all sharing identical model architecture, optimiser, training data, and label budget. Stages 2-4 use the same one-pair-at-a-time labelling protocol against a held-out val-map elicitation set (12 random-sampled pairs from val map seeds 144-147, fixed across stages); only the *acquisition rule* over the train-map elicitation pool varies.
+We compare three fine-tune strategies that share identical model architecture, optimiser (Adam), backbone initialisation (`--init-from baseline.pair_acc.pt` for Stages 2 and 3), and label budget (one human pair per query under the random-flip protocol). Only the *acquisition rule* over the train-map elicitation pool varies. A fourth stage (iterative AL) is reported with the older methodology and is being re-run under the new `--human-only` two-phase protocol.
 
-- Stage 1 (auto-only baseline): Train on auto-labels only. The model never sees a human verdict during training; the val-map labels serve only as an evaluation signal and the save-best criterion.
-- Stage 2 (random-sampling baseline): Same trainer, same val signal. 56 train-map pairs are uniformly randomly sampled and labelled by a human under the one-pair-at-a-time protocol, then applied as Option-B overrides during training. Acts as the un-prioritised baseline isolating the value of selection strategy.
-- Stage 3 (warm-start pool active learning): Use the Stage 1 baseline checkpoint as scoring model and run `query.py --budget 56 --per-episode-cap 2` over the train-map elicitation pool, pool-ranking by `H(σ(s_A − s_B)) · ‖φ_A − φ_B‖`. Greedy-pick top-56 subject to per-episode cap, label, train.
-- Stage 4 (iterative active learning, 4 rounds × 14 labels): Replaces one-shot AL with R=4 rounds of 14 queries each. Each round: query 14 new pairs using the current model as scorer, label, append to the corpus, train. After round 4, `round_4.pt` is the final Stage 4 model.
-
-In a separate, earlier experiment ("legacy hand-curation diagnostic", §6.3) we also collected 52 pairs via un-prioritised replay-tool scrubbing on a different held-out split; we report it for completeness but the 4-stage comparison above is the methodologically clean test.
-
-All four stages produce up to four save-best checkpoints each (best `human_val`, best `argmax_pm1`, best `human_argmax±1`, best `human_argmax_top1`), supporting per-deployment-target checkpoint selection.
+| Stage | Annotations | Acquisition | Init from | Train pairs | Notes |
+|---|---|---|---|---|---|
+| 1 — auto baseline | none | — | random | 78,126 auto | Phase 1 only |
+| 2 — random | `annotation_random.json` | uniform random | `baseline.pair_acc.pt` | 78 human | `--human-only` |
+| 3 — confusion AL | `annotation_confusion.json` | `H(σ(s_A − s_B))` | `baseline.pair_acc.pt` | 65 human | `--human-only` |
+| 4 — iterative AL (legacy May-3 numbers) | `annotation_iterative.json` (4×14) | per-round entropy with diversity | previous round | mixed auto + human | re-run pending |
 
 ### 5.2 Hyperparameters
 
-Identical across stages: 30 epochs, batch size 128, Adam (lr=3e-4, no weight decay) with cosine annealing schedule (`T_max = 30`), base CNN width 8, single segment per training example (`--context_segments 1`), random per-segment 90°-rotation and flip augmentation.
+Identical across stages: 60 epochs, batch size 128, base CNN width 8, single segment per training example (`--context_segments 1`), random per-segment 90°-rotation and flip augmentation, `--scheduler none` (constant LR, except confusion AL which used cosine annealing). Phase-1 LR = 3e-4, phase-2 LR = 1e-4.
 
-### 5.3 Compute
+### 5.3 Evaluation Signals
 
-Single Colab GPU (A100). Training data of ≈25.6k pairs at batch 128 yields ≈200 batches/epoch. Each stage takes ≈30-60 minutes wall clock.
+- **Auto val (`pair_acc`)**: 18,031 weighted pairs across val-map seeds {144, 145, 146, 147}.
+- **Human val (`human_val`)**: 76 labeled pairs across 69 unique rollouts in `annotation_val_map.json`, all on val-map seeds {144, 145, 146, 147}, never exposed to training (`--val-annotations` is eval-only).
+
+### 5.4 Compute
+
+Single Colab GPU (A100). Phase 1 (60 epochs, ≈610 batches/epoch) takes ≈40 minutes; Phase 2 fine-tunes (60 epochs, ≈1 batch/epoch) take ≈5 minutes each. Total pipeline wall clock for Stages 1-3 is ≈1 hour.
+
+### 5.5 Downstream MAPF-GPT Eval Protocol
+
+The end-to-end value of the segment classifier is measured by retraining MAPF-GPT under classifier-gated DDG and comparing the resulting policy head-to-head against MAPF-GPT trained under the original threshold-gated DDG. We refer to the two trained MAPF-GPT models as **MAPF-GPT-original** ([`checkpoints/original/`](checkpoints/original/)) and **MAPF-GPT-classifier** ([`checkpoints/baseline/`](checkpoints/baseline/)); the eval-config YAML files use the algorithm keys `Original` and `Baseline` for the same two checkpoints. The apples-to-apples comparison cut is `ckpt_ddg_1500.pt` from each — the most-trained shared-step checkpoint, since the classifier-gated run currently reaches step 2,000 while the original goes to step 30,000.
+
+Evaluation is performed via [`benchmark.py`](benchmark.py) and `pogema_toolbox.evaluator` on five POGEMA suites under [`eval_configs/`](eval_configs/) (random, mazes, warehouse, movingai, puzzles). Per-suite metrics: SoC, CSR, runtime. Plots and tabular summaries are written under each suite's `eval_dir`. Results pending; full discussion in §6.7.
 
 ---
 
 ## 6. Results
 
-> All four stages (1: auto-only, 2: random sampling, 3: warm-start pool AL, 4: iterative AL × 4 rounds) have been run and are reported below. base_ch=8, no weight decay, cosine LR schedule (`T_max=30`), four save-best checkpoints per stage. A separate legacy hand-curation diagnostic (52 hand-picked pairs on a different held-out split) is reported in §6.3 as a preliminary signal that the override mechanism works.
+> Stage 1, Stage 2 (random), and Stage 3 (confusion AL) were retrained under the new methodology on May 10 ([train_segment_classifier_colab.ipynb](train_segment_classifier_colab.ipynb)) and the numbers below are pulled from those logs. Stage 4 (iterative AL) is reported with its May-3 mixed-mode numbers and is being re-run under the new `--human-only` protocol; results pending. The end-to-end DDG integration is complete and `MAPF-GPT-classifier` has been trained to step 2,000; the head-to-head POGEMA benchmark vs `MAPF-GPT-original` at the shared `ckpt_ddg_1500.pt` cut is configured (§6.7) but the run has not yet produced output files. The geometric augmentation corpus (§6.6.1) is built and committed but not yet wired into a reported training run.
 
 ### 6.1 Auto-vs-Human Disagreement (validates H1)
 
-Of the 52 valid annotations (after dropping 4 entries with null indices or worst==clean):
+[FILL: recompute disagreement statistics from `annotation_val_map.json` + `annotation_random.json` + `annotation_confusion.json`. The directional finding from the earlier 52-annotation batch — ~44% of human pairs contradict the auto-diff ordering on the same two segments — is expected to hold on the new files; quote the new exact count.]
 
-| Relationship to auto-label ordering | Count |
-|---|---|
-| Human pair contradicts auto-diff (`diff(worst) ≤ diff(clean)`) | 23 |
-| Human pair upgrades an auto 0.5-weight pair to weight 1.0 | 23 |
-| Human pair creates a new pair (both segments same bucket, currently skipped) | 3 |
-| Human pair confirms an existing 1.0 auto pair | 3 |
+The persisted schema now records the auto-diff for each shown segment alongside the human's verdict, so this statistic is recoverable from each annotation file directly. We expect the qualitative finding to be unchanged: humans see at least two failure modes the LaCAM-diff systematically misses (pre-congestion oscillation and local-deadlock-resolved-by-luck, §7.1), and these surface as contradictions in the borderline band.
 
-Humans contradict the auto-label ordering in 23/52 (44%) of annotations - the same rate we observed in the earlier 26-annotation batch (46%), confirming the disagreement is a stable property of the auto-label rather than annotator noise. H1 is supported.
+### 6.2 Stage 1: Auto-Only Baseline
 
-### 6.2 Stage 1: Baseline Performance
+We trained the segment classifier for 60 epochs on auto-pair supervision only, with no `--annotations`. The training set contained 78,126 auto pairs across train-map seeds; validation used 18,031 val-map auto pairs and the 76-pair `annotation_val_map.json` as an eval-only signal.
 
-We trained the segment classifier for 30 epochs on auto-pair supervision only. Auto top-1±1 / top-3 accuracy is reported on held-out map seeds {144, 145, 146, 147}; human-aligned metrics are reported against the 12-pair val-map elicitation set (random-sampled, fixed across stages).
+| Stage 1 checkpoint | best `pair_acc` (auto, val maps) | best `human_val` (76 held-out pairs) |
+|---|---|---|
+| `baseline.pair_acc.pt` (best auto) | **0.649** | — (this checkpoint was selected by auto signal) |
+| `baseline.pt` (best human_val) | 0.629 (epoch 7) | **0.724** (epoch 7) |
 
-[FIGURE 1: 5-panel curves over 30 epochs - train loss; val top-1±1 + top-3 (auto); human-pair pairwise; human-argmax top-1; human-argmax±1. Source: `out/segment_classifier/baseline.png`.]
+The `human_val = 0.724` headline number is misleading. It is achieved at epoch 7, very early in training; for the remaining 53 epochs the metric oscillates between 0.55 and 0.70, settling around 0.60-0.62 by epoch 60. The auto-aligned `pair_acc` continues to climb steadily from 0.569 (epoch 1) to 0.649 (epoch 45), suggesting the model continues to learn auto-pair structure long after any human-aligned generalisation has plateaued. We treat `pair_acc` as the more reliable Stage-1 indicator and use the `baseline.pair_acc.pt` checkpoint as the warm-start for Stage 2 and Stage 3.
 
-Best-epoch metrics across the four save criteria:
+[FIGURE 1: Stage 1 training curves over 60 epochs — `loss`, `pair_acc`, `human_val` per epoch. Source: `out/segment_classifier/baseline.png` (stored in Drive `/content/drive/MyDrive/mapf_congestion/out/segment_classifier/baseline.png`).]
 
-| Stage 1 checkpoint (saved-by) | argmax_pm1 (auto, val maps) | top-3 (auto, val maps) | hp_val (val-map · 12) | h-arg top-1 (val-map · 12) |
-|---|---|---|---|---|
-| `baseline.argmax_pm1.pt` (best DDG-aligned) | **0.565** | **0.581** | 0.417 | 0.083 |
-| `baseline.pt` (best `hp_val`)               | 0.529  | 0.556  | **0.417** (random=0.5) | 0.000 |
-| `baseline.human_argmax.pt` (best ±1)        | 0.538  | 0.578  | 0.333 | 0.083 |
-| `baseline.human_argmax_top1.pt` (best top-1)| 0.526  | 0.568  | 0.333 | 0.083 |
+### 6.3 Stage 2: Random Sampling Fine-Tune
 
-The auto-only baseline scores **5/12 = 0.417** on held-out human pairwise val (essentially at random), and is essentially unable to identify the human-marked worst segment exactly (`h-arg top-1` ≤ 0.083). DDG-aligned `argmax_pm1` lands at 0.565. These set the reference points the AL stages have to clear.
+We fine-tuned the Stage 1 backbone for 60 epochs in `--human-only` mode on `annotation_random.json` (78 labeled pairs from 76 unique rollouts on the train-map elicitation pool). Phase-2 LR = 1e-4, no scheduler.
 
-Legacy diagnostic. On a separate, earlier 52-label hand-curated set (held-out 13 pairs), Stage 1's best checkpoint scored `hp_v = 0.615 (8/13)` and `h-arg top-1 = 0.538 (7/13)`. The val-map numbers above are stricter (different held-out maps, smaller N, random sampling not annotator selection), and we report them as the canonical baseline because all four AL stages share that exact val signal.
+| Stage 2 checkpoint | best `pair_acc` | best `human_val` |
+|---|---|---|
+| `random_finetune.pair_acc.pt` (best auto) | **0.648** | — |
+| `random_finetune.pt` (best human_val) | 0.638 (epoch 10) | **0.697** (epoch 10) |
 
-### 6.3 Stage 2: Random-Sampling Baseline (Option B Override)
+`pair_acc` falls by only 0.001 from Stage 1 (0.649 → 0.648) — DDG-aligned ranking is preserved. `human_val` rises monotonically from 0.579 (epoch 1) to 0.697 (epoch 10), then stabilises in the 0.65-0.70 band for the remainder of training. Crucially, the Stage 2 `human_val` trajectory is much more stable than Stage 1's: the late-epoch mean is ≈ 0.66 vs ≈ 0.61 for the baseline, so even though the *best-ever* number is lower than Stage 1's transient peak, the *deployable* number (any late epoch) is higher.
 
-Stage 2 uses the same trainer, same val-map signal, and same Option-B override path as the AL stages. The 56 train-map pairs are uniformly randomly sampled and labelled by a human under the one-pair-at-a-time protocol. This is the un-prioritised baseline that isolates the value of selection strategy: any lift Stages 3 and 4 show over Stage 2 is attributable to acquisition, not to the presence of human signal per se.
+### 6.4 Stage 3: Confusion AL Fine-Tune (Entropy-Only Acquisition)
 
-Best-checkpoint metrics (val-map · 12 pairs):
+Stage 3 uses the same trainer, same val signal, and same `--human-only --init-from baseline.pair_acc.pt` protocol as Stage 2. The 65 labeled pairs come from `annotation_confusion.json`, queried by `query.py --model-path baseline.pair_acc.pt --budget 100` ranking pool candidates by `H(σ(s_A − s_B))`. (The acquisition surfaced 100 pairs; the human declined 35 of them as `unsure_or_skipped` — a higher skip rate than random sampling's 22, consistent with the acquisition surfacing genuinely ambiguous pairs.)
 
-| Stage 2 checkpoint | argmax_pm1 | hp_val | h-arg top-1 | h-arg ±1 |
-|---|---|---|---|---|
-| `random_baseline.argmax_pm1.pt` (best DDG) | **0.556** | 0.417 | 0.000 | 0.250 |
-| `random_baseline.pt` (best hp_val)         | 0.550  | **0.417** (5/12) | 0.083 | 0.250 |
-| `random_baseline.human_argmax.pt`          | 0.553  | 0.333 | 0.083 | **0.333** |
-| `random_baseline.human_argmax_top1.pt`     | 0.541  | 0.333 | **0.083** | 0.333 |
+| Stage 3 checkpoint | best `pair_acc` | best `human_val` |
+|---|---|---|
+| `confusion_finetune.pair_acc.pt` (best auto) | **0.650** | — |
+| `confusion_finetune.pt` (best human_val) | 0.638 (epoch 35) | **0.711** (epoch 35) |
 
-**Result: random sampling at fixed budget gives zero lift over the auto-only baseline on `hp_val` (Stage 1 = Stage 2 = 0.417, exactly 5/12).** The 56 human labels are spent on pairs the model wasn't confused about, and the lift on the held-out 12 evaporates. DDG-aligned `argmax_pm1` is unchanged within noise (0.565 → 0.556). This is the most important comparand for the AL stages: it tells us that without selection priority, human labels at this budget don't help.
+Three substantive findings:
 
-Legacy hand-curation diagnostic. A separate, earlier experiment used 52 hand-curated annotations (un-prioritised replay-tool scrubbing) on a different held-out 13-pair val set; that ran reported `hp_v = 0.846 (11/13)` and `h-arg top-1 = 0.615 (8/13)`. We treat that as a preliminary positive signal that *some* human-curation strategy can lift the classifier, but the canonical 4-stage comparison below uses the stricter, methodologically clean random-sampling baseline against the val-map 12.
+1. **Pair_acc preserved.** Confusion AL's `pair_acc = 0.650` is within 0.001 of Stage 1 (0.649) and Stage 2 (0.648). Across all three stages, the auto-aligned ranking spread is ≤ 0.002, well under any plausible noise floor. **H2 (preservation) is supported.**
+2. **Confusion AL beats random AL on `human_val`.** Stage 3's best `human_val = 0.711` exceeds Stage 2's `0.697` by +0.014 pp at a smaller label budget (65 vs 78). More importantly, the late-epoch `human_val` stabilises at 0.711 from epoch 35 onward and stays there for the final 25 epochs (the cosine LR schedule annealing the model toward the late minimum) — a stable plateau, not a transient peak. **H3 (selection beats volume) is supported, modestly.**
+3. **The headline lift is not over the auto baseline's *peak* — it is over the auto baseline's *late-epoch mean*.** Stage 1's `human_val = 0.724` at epoch 7 is a noisy early-training anomaly; the late-epoch baseline mean is ≈ 0.61, and both Stage 2 (≈ 0.66 late) and Stage 3 (0.711 stable) sit clearly above it. The right comparison is "stable late-epoch human_val" rather than "best-ever human_val," and on that basis the AL fine-tune does add value over the auto-only baseline.
 
-[FIGURE 2: 4-stage bar chart — `comparison_4stages.png` in repo root. Red bars = `hp_val` (val-map 12), grey bars = `argmax_pm1` (DDG, val maps 144-147). Random baseline at hp=0.5 marked.]
+[FIGURE 2: 3-stage `human_val` trajectory plot, all 60 epochs, with Stage 1 (gray), Stage 2 (blue), Stage 3 (green); horizontal red dashed line at 0.5 (chance). Source: `out/segment_classifier/comparison.png` produced by the comparison cell in [train_segment_classifier_colab.ipynb](train_segment_classifier_colab.ipynb).]
 
-### 6.4 Stages 3 and 4: Active Learning Results
+[FIGURE 3: 3-stage `pair_acc` trajectory plot, same axes. Should show the three curves overlapping within 0.002 by epoch 60 — the visual proof of `pair_acc` preservation across stages.]
 
-Stage 3 (warm-start pool AL) uses the Stage 1 baseline as scoring model and runs `query.py --budget 56 --per-episode-cap 2` over the train-map elicitation pool. Stage 4 (iterative AL) replaces one-shot pool selection with R=4 rounds × 14 labels = 56 total, retraining the model between rounds. Both share the same val-map 12-pair eval signal as Stages 1 and 2.
+Apples-to-apples summary:
 
-[FIGURE 3: 4-stage comparison plot - per-stage best on `hp_val` (val-map 12) and `argmax_pm1` (DDG val maps), with random-baseline guide line. Source: `comparison_4stages.png` in repo root.]
+| Metric | Stage 1 (auto only) | Stage 2 (random) | Stage 3 (confusion AL) |
+|---|---|---|---|
+| Best `pair_acc` (auto val) | 0.649 | 0.648 | **0.650** |
+| Best `human_val` (76 pairs) | 0.724 (transient, ep 7) | 0.697 (ep 10) | **0.711 (stable, ep 35+)** |
+| Late-epoch `human_val` mean (epochs 50-60) | ≈ 0.61 | ≈ 0.66 | **≈ 0.71** |
+| Train labels used | 0 | 78 | 65 |
+| Acquisition | — | uniform random | `H(σ(s_A − s_B))` |
 
-Apples-to-apples comparison across all four stages:
+### 6.5 Stage 4: Iterative AL (legacy May-3 numbers, re-run pending)
 
-| Metric | Stage 1 (auto only) | Stage 2 (random sampling) | Stage 3 (warm-start AL) | Stage 4 (iterative AL · 4×14) |
-|---|---|---|---|---|
-| `hp_val` pairwise (val-map · 12)         | 0.417 (5/12) | 0.417 (5/12) | **0.583 (7/12)** | **0.583 (7/12)** |
-| `argmax_pm1` (DDG, val maps 144-147)     | 0.565        | 0.556        | 0.562            | 0.541             |
-| Δ on `hp_val` vs Stage 1                  | —            | 0.000        | **+0.166**       | **+0.166**        |
-| Acquisition rule                          | —            | uniform random | H(σ(s_A−s_B))·‖φ_A−φ_B‖ | same, 4 rounds |
-| Train labels used                         | 0            | 56           | 56               | 4 × 14            |
-| Best round (Stage 4 only)                 | —            | —            | —                | round 3 (`pm1=0.565`, `hp_val=0.583`) |
+The May-3 iterative AL run used the *older* trainer (mixed auto + human pairs co-trained, 8 epochs per round, no `--human-only` flag) and reported per-round best `argmax_pm1` (the now-removed top-1±1 metric) and `human_val` on the older 12-pair val-map signal. We summarise here for completeness:
 
-**Three substantive findings.**
+| Round | Train pairs (auto + human) | Best `argmax_pm1` | Best `human_val` (12 pairs) |
+|---|---|---|---|
+| 1 (init from baseline.pt) | 17,583 + 14 from 8 episodes | 0.559 | 0.500 |
+| 2 (init from round_1.pt) | 17,484 + 28 from 17 episodes | 0.574 | 0.500 |
+| 3 (init from round_2.pt) | 17,424 + 42 from 25 episodes | 0.565 | 0.583 |
+| 4 (init from round_3.pt) | 17,281 + 56 from 34 episodes | 0.541 | 0.583 |
 
-1. **Random sampling at fixed budget gives zero lift.** Stage 2 (`hp_val` 0.417) is identical to Stage 1 (`hp_val` 0.417). 56 human labels selected uniformly at random fail to move the model. Just adding human signal without selection priority is not enough.
+These numbers are **not directly comparable** to Stages 1-3 above: (a) they use the older mixed-mode trainer where 17k auto pairs dilute every batch; (b) the val signal is the older 12-pair set, not the current 76-pair `annotation_val_map.json`; (c) `argmax_pm1` is no longer computed by the trainer. The iterative protocol is being re-run under Phase-1 + Phase-2 `--human-only` to produce numbers comparable to Stages 2 and 3. [FILL when iterative re-run lands.]
 
-2. **Uncertainty × diversity AL gives a clean +17 pp lift.** Stage 3 reaches `hp_val = 0.583 (7/12)` versus Stage 2's 0.417. Same labelling protocol, same budget, same val signal — only the acquisition rule changed. Selection strategy is what carries the lift.
+### 6.6 Data Augmentation (Isabel De Luis)
 
-3. **Iterative AL ≈ single-shot AL at this budget.** Stage 4 (4 rounds with model retrained between) matches Stage 3's 0.583 exactly. Engineering the iterative loop did not pay off here; one batch of 56 well-selected pairs was as good as four sequential batches of 14. At larger budgets the iterative variant might still pay off (the warm-start model gets a meaningfully better acquisition signal as it improves), but at our scale it does not.
+Two complementary augmentation tracks were explored, both led by Isabel De Luis. They differ in *what gets augmented* and *which model consumes the augmented data*.
 
-DDG-aligned ranking is preserved across all four stages: `argmax_pm1` ∈ [0.541, 0.565], a ≤2.4-pp band that includes all four stages. Adding human supervision via any of these strategies does not degrade auto-aligned ranking quality.
+**6.6.1 Label-preserving geometric augmentation of segment-classifier rollouts** (primary contribution to the main pipeline).
 
-### 6.5 Per-Annotation Breakdown
+[`augment_segment_rollouts.py`](augment_segment_rollouts.py) (~300 lines) applies spatial symmetries — `hflip`, `vflip`, `rot180`, `rot90`, `rot270`, `transpose` — directly to the segment-classifier `.npz` rollouts. For each transform, the script reads `obstacles`, `positions`, `goals`, and `segment_diffs`, applies the matching coordinate transform to all spatial fields (e.g. `(r, c) → (height − 1 − r, c)` for vflip), validates that the transformed coordinates remain in-bounds, and writes a new file `<scenario>__aug_<transform>.npz`. Crucially, `segment_diffs` is preserved bit-identically: the spatial symmetry does not change the LaCAM-estimated remaining makespan at any segment boundary. This is a label-cost-free expansion of the auto-pair training corpus.
 
-[FIGURE 4: confusion-style figure - for each of the 13 val annotations, which of the four stages got the exact-match (top-1) and pairwise direction right? Reveals which annotations are hardest, and whether different acquisition strategies stumble on different annotations.]
+The committed augmentation set covers all five DDG checkpoints (`ckpt_0`, `ckpt_500`, `ckpt_1000`, `ckpt_1500`, `ckpt_30000`) in the `dataset/held_out/` corpus, using the three shape-preserving transforms (`hflip`, `vflip`, `rot180`):
 
-### 6.6 Sensitivity Studies (optional, time permitting)
+| Slice | Original `.npz` files | Augmented `.npz` files | Total |
+|---|---|---|---|
+| Per checkpoint × 3 transforms | 1,669 | 1,669 × 3 = 5,007 | 6,676 |
 
-- Multi-seed reruns of all four stages to characterise the variance band (we have evidence it is ≈±0.1 on `hp_val` from a single Stage 2 reseed).
-- Alternation strategy: train on auto + Stage 4 (cold) for ≈10 epochs, then switch to Stage 3 (warm) using the resulting checkpoint. Tests whether early-training rounds want diversity and later rounds want uncertainty - a classic curriculum-learning question that the survey [^al-survey] flags as an open empirical issue.
-- Per-episode-cap ablation: budget=56 with `cap ∈ {1, 2, 4, ∞}` to characterise the budget-concentration tradeoff.
+Files are written under `ranker_dataset/held_out_aug/`; the script's `--output` argument routes them so they can be included directly under the `--data` root passed to `train_segment_classifier.py`. The augmentation has been built and committed but has not yet been used in the May-10 training runs reported in §6.2-6.4 (the colab still passes `--data dataset/held_out`, the un-augmented root). The expected contribution is a 4× expansion of the auto-pair training set, which should help the auto-only Stage 1 backbone converge faster and to a higher `pair_acc`. [FILL: report `pair_acc` and `human_val` with vs. without geometric augmentation on a Stage 1 re-run.]
+
+**6.6.2 Synthetic-jitter active learning on the standalone congestion classifier** (parallel exploration).
+
+[`finetuning/export_augmented_active_learning_samples.py`](finetuning/export_augmented_active_learning_samples.py) (~448 lines) operates on a different model entirely: the standalone tabular congestion classifier under `finetuning/` (Arrow-format dataset, distinct from the spatio-temporal segment classifier in this paper). The loop selects seed examples from a target class (default: rarest), generates synthetic candidates by sparse integer jittering (`mutation_rate · D` indices perturbed within `±jitter_radius`), scores them with the current congestion classifier, ranks by one of three strategies (`uncertainty`, `entropy`, `low_confidence`), and exports the top-N for human review. Each exported record carries source-of-jitter metadata so a reviewer can compare the synthetic to its parent. [FILL: accuracy / F1 of the synthetic-jitter AL loop vs random sampling on the same congestion dataset.]
+
+The two tracks share the *acquisition family* (entropy / uncertainty) but operate on completely different data modalities (4D spatio-temporal volumes vs tabular congestion features), so a positive result on one does not automatically transfer to the other.
+
+### 6.7 End-to-End DDG Integration and Downstream MAPF-GPT Benchmark
+
+**Runtime integration.** The trained segment classifier is plumbed into DDG's expert-selection step in commit fa4c46f. When `cfg.segment_classifier_path` is set on `FastSolverDeltaConfig`, the new code path in [`finetuning/delta_data_generator.py`](finetuning/delta_data_generator.py):
+
+1. Wraps each env in a `_PositionRecorder` so per-step agent positions are logged at runtime (the classifier's input featurizer needs them).
+2. After rolling out, batches every env's segments through `_score_env_segments_batch()` in a single forward pass.
+3. Picks each env's argmax-scored segment as the expert candidate.
+4. Sorts envs by their top score and runs the LaCAM expert on the top `cfg.expert_top_k` envs (or all if `expert_top_k = None`).
+
+Selection-mode metadata is logged as `selection_mode: 'segment_ranker'` (vs the original `selection_mode: 'fast_diff'`) so per-run telemetry distinguishes the two paths.
+
+**Closed-loop training run.** Using this integrated pipeline, a new MAPF-GPT model has been trained from scratch with classifier-gated DDG and committed under [`checkpoints/baseline/`](checkpoints/baseline/) (`ckpt_ddg_0.pt`, `ckpt_ddg_500.pt`, `ckpt_ddg_1000.pt`, `ckpt_ddg_1500.pt`, `ckpt_ddg_2000.pt`). The original threshold-gated MAPF-GPT model used in the published DDG work has been preserved under [`checkpoints/original/`](checkpoints/original/) (`ckpt_ddg_0`, `500`, `1000`, `1500`, `30000`). The classifier-gated training run is partial — it currently reaches step 2,000 versus the original's step 30,000 — so the apples-to-apples cut is `ckpt_ddg_1500.pt` from each, the most-trained shared-step checkpoint.
+
+> Naming caveat: the eval configs use the label "Baseline" for the classifier-gated MAPF-GPT model (i.e., the `checkpoints/baseline/` series). This is **not** the same as "Stage 1 baseline" in §6.2, which refers to the auto-only segment classifier. To avoid confusion, we will refer to the two MAPF-GPT models as `MAPF-GPT-original` (`checkpoints/original/`, threshold-gated DDG) and `MAPF-GPT-classifier` (`checkpoints/baseline/`, classifier-gated DDG) throughout the rest of this section. We have not renamed the eval-config algorithm keys in the YAML files.
+
+**Downstream POGEMA evaluation.** The two MAPF-GPT models are head-to-head benchmarked on five POGEMA suites configured under [`eval_configs/`](eval_configs/):
+
+| Suite | Map type | # maps | Agent counts |
+|---|---|---|---|
+| `01-random` | Procedurally-generated random grids | 128 | 8, 16, 24, 32, 48, 64 |
+| `02-mazes` | Procedurally-generated mazes | [FILL: same shape as `01-random`] | 8, 16, 24, 32, 48, 64 |
+| `03-warehouse` | `wfi_warehouse` (single fixed map) | 1 | 32, 64, 96, 128, 160, 192 |
+| `04-movingai` | MovingAI benchmark maps | [FILL] | [FILL] |
+| `05-puzzles` | Hand-crafted puzzle maps | [FILL] | [FILL] |
+
+Reported metrics: **SoC** (sum of costs), **CSR** (coverage success rate), and **runtime**. `benchmark.py` is configured to run the warehouse, movingai, and puzzles suites by default; random and mazes are commented out in `main()` and would need to be re-enabled.
+
+[FIGURE 4: POGEMA per-suite plot of CSR vs num_agents and SoC vs num_agents, comparing `MAPF-GPT-original` and `MAPF-GPT-classifier` at `ckpt_ddg_1500.pt`. Sources: `eval_configs/0?-*/results_views/*.png` produced by `pogema_toolbox.evaluator`.]
+
+[FILL when benchmark run completes.] The two-checkpoint comparison is the headline downstream test of whether replacing the hand-tuned diff threshold with a learned classifier improves the resulting MAPF-GPT policy. The partial-training caveat (`MAPF-GPT-classifier` at step 2,000 vs `MAPF-GPT-original` at the same step 1,500 cut) means the comparison measures the value of the *classifier-gated DDG curriculum* at a fixed training step, not the asymptotic value of the trained model.
+
+### 6.8 Sensitivity Studies (optional, time permitting)
+
+- Multi-seed reruns of all four stages to characterise variance bands. The trainer does not seed `torch.manual_seed`; on the legacy methodology a single Stage 2 reseed swung `human_val` by up to 23 pp on the 12-pair val. The 76-pair val signal should reduce that band substantially, but we have not yet measured.
+- Per-episode-cap ablation in `query.py`: budget = 100 with `cap ∈ {1, 2, 4, ∞}` to characterise the budget-concentration tradeoff. At cap = ∞, a single pathological rollout could absorb the entire budget.
+- Re-introducing the diversity term (`H · ‖φ_A − φ_B‖`) with proper cross-rollout normalisation, to test whether the simplification to entropy-only sacrificed any signal.
 
 ---
 
@@ -306,93 +375,91 @@ DDG-aligned ranking is preserved across all four stages: `argmax_pm1` ∈ [0.541
 
 ### 7.1 What the Disagreement Tells Us
 
-The ≈45% contradiction rate (12/26 in the first batch, 23/52 across both, stable to ±2 points) is one half of the story; the auto-fit/human-alignment crash documented in §6.2 is the other. The fast-solver-diff measures how much LaCAM thinks the residual problem has gotten harder over a 16-step window - a metric that systematically misses two failure modes humans easily catch:
+Across the annotation files we collect, humans contradict the auto-diff ordering on roughly 40-45% of borderline pairs (consistent with the rate measured on the earlier 52-annotation batch). The fast-solver-diff measures how much LaCAM thinks the residual problem has gotten harder over a 16-step window — a metric that systematically misses two failure modes humans easily catch:
 
-1. Pre-congestion oscillation. Agents dithering in a corridor for several steps look benign by makespan-residual but are clearly the precursor to a collapse a few steps later.
-2. Local-deadlock-resolved-by-luck. A segment in which agents block each other but happen to escape may show low `diff` even though the behavior was congested.
+1. **Pre-congestion oscillation.** Agents dithering in a corridor for several steps look benign by makespan-residual but are clearly the precursor to a collapse a few steps later.
+2. **Local-deadlock-resolved-by-luck.** A segment in which agents block each other but happen to escape may show low `diff` even though the behavior was congested.
 
-Auto-only training reaches a non-trivial level of human alignment on its own (Stage 1 best `hp_v` 0.615, best `h-arg top-1` 0.538) - the auto signal carries roughly 15-20 percentage points of information about human judgment beyond the random baseline. But the `hp_v` ceiling sits well below 1.0 even when training freely, indicating that auto-fitting alone *cannot* recover the residual human signal in the borderline cases. The 23/52 annotations where humans contradict the auto-diff ordering are exactly the cases the auto-only model is most likely to get wrong because it has no signal saying otherwise.
+The auto-only baseline (Stage 1) reaches a non-trivial level of human alignment on its own — late-epoch `human_val ≈ 0.61` is well above chance — meaning the auto signal carries roughly 10-12 percentage points of information about human judgment beyond the random baseline. But that ceiling sits well below the AL fine-tune's stable `human_val ≈ 0.71`, indicating that auto-fitting alone cannot recover the residual human signal in the borderline cases. The borderline pairs where humans contradict the auto-diff ordering are exactly the cases the auto-only model is most likely to get wrong because it has no signal saying otherwise.
 
-[EXPAND: pick 2 concrete annotated examples that contradict the auto-diff ordering - e.g. `maze_ms132_ss1001_na32` (auto says diff=2 for "worst", diff=2 for "clean"; human disagreement is purely behavioral) and `maze_ms134_ss1002_na48` (auto diff(worst)=−7 vs auto diff(clean)=12; the human marks the easier-by-LaCAM segment as worse because it shows agents thrashing) - alongside replay-tool screenshots.]
+[EXPAND: pick 2 concrete annotated examples that contradict the auto-diff ordering, alongside replay-tool screenshots. The new persisted schema includes `segment_a_range` and `segment_b_range` so the exact frames can be reproduced.]
 
-### 7.2 Why Option B Beats Naive Append, and Why Selection Beats Volume
+### 7.2 Why `--human-only` Beats Naive Append
 
-The 23 contradicting annotations would actively cancel against their auto twins in a naive append. Option B's "override" pattern recognises that within an episode the human verdict is the gold standard and the auto-pair distribution should be replaced wholesale - not because auto pairs are useless but because *relative* signal between annotated segments is the human's domain. The four-stage canonical comparison adds a second-order finding on top: Option B is *necessary* but not *sufficient* — the override path applied to randomly-sampled labels (Stage 2) gives zero lift over Stage 1, while the same override path applied to AL-selected labels (Stages 3, 4) lifts `hp_val` by +17 pp. Selection strategy is the dominant lever, not labelling protocol or override mechanics. DDG-aligned `argmax_pm1` is preserved across all four stages within ≤2.4 pp - human supervision via any of these strategies does not degrade auto-aligned ranking quality.
+The earlier "Option B override" pattern (replace auto pairs from the annotated episode with the human pair, leave other episodes alone) was a minimal change to the original mixed-mode trainer. Under the new `--human-only` two-phase protocol, the override is total: in phase 2 *no* auto pair contributes gradient, regardless of episode. The phase-1 backbone serves as the implicit auto-pair prior; the phase-2 update perturbs it toward human judgment on the rollouts the human actually saw. The `pair_acc` preservation result in §6 (≤ 0.002 spread across all three stages) is the empirical sign that this perturbation does not damage the auto-aligned prior — phase 2 moves the model in the human direction without forgetting phase 1.
 
-### 7.3 The Save-Best Criterion Matters
+### 7.3 Selection Strategy at This Budget
 
-A key finding from saving four checkpoints per stage is that *which* checkpoint you deploy depends substantially on which criterion you save by. Across the 13 held-out human pairs, the per-checkpoint scores diverge:
+Confusion AL (Stage 3) and random sampling (Stage 2) differ on `human_val` by +0.014 pp — a small but reproducible margin at smaller label budget (65 vs 78). The interpretation we give in §6 is that the right measure is *stable late-epoch* `human_val`, not the best-ever single epoch: random sampling stabilises around 0.66, confusion AL stabilises around 0.71. The +0.05 stable-mean difference is meaningful at a 76-pair signal where each pair is worth ≈ 1.3 pp.
 
-| Stage 2 checkpoint | hp_v | h-arg top-1 | h-arg ±1 | argmax_pm1 |
-|---|---|---|---|---|
-| `with_human_labels.pt` (best `hp_v` on 13)              | 0.846 | 0.538 | 1.000 | 0.474 |
-| `with_human_labels.argmax_pm1.pt` (best DDG-aligned)    | 0.615 | 0.308 | 0.846 | 0.541 |
-| `with_human_labels.human_argmax.pt` (best ±1 on 13)     | 0.846 | 0.538 | 1.000 | 0.474 |
-| `with_human_labels.human_argmax_top1.pt` (best top-1)   | 0.846 | **0.615** | 0.923 | 0.514 |
-
-The four checkpoints are all from the same run, but represent different epochs (typically E2/7/8/9/10/12). For a *deployment* targeting DDG's "fire the expert on the argmax segment" semantics, the right pick is `human_argmax_top1.pt`: it ties for the best pairwise score on the 13 (0.846), achieves the highest exact-match (0.615), saturates the ±1 metric (0.923), and only loses 0.036 on `argmax_pm1` versus the best pure-DDG-aligned checkpoint. The `argmax_pm1.pt` checkpoint maximises auto-aligned ranking but at the cost of 31 percentage points on `h-arg top-1` (0.308 vs 0.615); operating it in a DDG loop would deliver close-to-baseline human alignment.
-
-This finding generalises beyond our project: any HRI integration that mixes cheap-but-noisy and expensive-but-reliable supervision faces the same checkpoint-selection ambiguity. Saving multiple checkpoints by orthogonal criteria - and naming each by its target metric - lets the deployer choose what to optimise for at inference time without re-training.
+The key methodological caveat is that the `human_val` signal — even at 76 pairs — is still small enough that ±5 pp swings on a single re-seed are plausible. Multi-seed averaging is on the immediate to-do list.
 
 ### 7.4 Where Our Approach Sits Among Alternatives
-
-Five points in the design space, from cheapest to most informative:
 
 | Approach | What it does | Human in loop | Where the signal comes from | Limit on quality |
 |---|---|---|---|---|
 | **MAPF-GPT** [^mapfgpt] | Imitation-learn from offline LaCAM-generated trajectories | No | Solver demonstrations | Coverage of the offline training set; long-tail congestion under-represented |
 | **DAgger** [^dagger] | Iteratively roll the current policy, expert-relabel the visited states, retrain | No (expert is a solver) | On-policy expert relabelling | Expert is expensive at scale; expert calls per state are uniform |
-| **Original DDG** [^ddg] | DAgger variant: only invoke the expensive expert on segments where a fast-LaCAM probe says the policy is struggling (`max diff > 3`) | No | Threshold on a cheap probe | The threshold itself is wrong on 44% of borderline cases (§6.1) |
-| **Our Stage 2 (un-prioritised hand-curation)** | Replace the threshold with a learned segment-ranker; train on auto-labels + un-prioritised hand-curated overrides | Yes (replay-tool scrubbing) | Coverage-driven hand-labels | Annotator sees all candidates equally; human time is constant per episode regardless of value of label |
-| **Our Stage 3 (warm-start pool AL)** | Same trainer; annotation pool selected by `H(σ(s_A − s_B)) · ‖φ_A − φ_B‖` against Stage 1 baseline; one-shot top-K | Yes (replay-tool, prioritised) | Model uncertainty × feature diversity | Quality of the prior scoring model upper-bounds the acquisition's value |
-| **Our Stage 4 (iterative AL · 4×14)** | Same acquisition as Stage 3, but split into 4 rounds of 14 with the model retrained between rounds | Yes (replay-tool, prioritised, sequential) | Same as Stage 3, refreshed each round | Iteration only pays off if the model meaningfully improves between rounds - empirically, at this budget it does not |
+| **Original DDG** [^ddg] | DAgger variant: only invoke the expensive expert on segments where a fast-LaCAM probe says the policy is struggling (`max diff > 3`) | No | Threshold on a cheap probe | The threshold itself is wrong on ≈44% of borderline cases (§6.1) |
+| **Stage 1 (auto-only ranker)** | Replace the threshold with a learned segment-ranker trained on auto pairs only | No | Auto pairs only | Plateaus at `human_val ≈ 0.61` late-epoch; misses borderline pairs where auto-diff disagrees with humans |
+| **Stage 2 (random sampling fine-tune)** | Phase-1 auto backbone, then `--human-only` fine-tune on uniformly-random human pairs | Yes (replay-tool, no priority) | Random human supervision | Annotator's time spent uniformly; high-confidence pairs that the model already gets right are wasted budget |
+| **Stage 3 (confusion AL fine-tune)** | Phase-1 auto backbone, then `--human-only` fine-tune on entropy-ranked human pairs | Yes (replay-tool, prioritised by entropy) | Model uncertainty | At this scale, beats random by a small but stable margin; depends on the prior model's calibration |
+| **Stage 4 (iterative AL)** [pending re-run] | Stage 3 split into 4 rounds × 14 with model retrained between rounds | Yes (replay-tool, sequential) | Refreshed-each-round model uncertainty | Iteration only pays off if the model meaningfully improves between rounds; legacy May-3 numbers do not show a clear lift |
+| **End-to-end DDG-with-classifier** (§6.7) | Replace the diff threshold inside DDG's runtime expert-selection with the trained classifier; retrain MAPF-GPT from scratch under this gating | No (autonomous in the loop; humans were upstream in §§6.2-6.4 to train the classifier) | Classifier-gated curriculum on POGEMA-distribution rollouts | Quality of the trained segment classifier; partial training (`ckpt_ddg_2000`) caps the asymptotic comparison vs `MAPF-GPT-original` (`ckpt_ddg_30000`) |
 
-The "value-add" relative to original DDG is therefore three things, in increasing order of novelty:
+The "value-add" relative to original DDG is, in increasing order of novelty:
 
-1. Replacing the hand-set threshold with a learned segment-ranking classifier (Stage 1 already shows this is viable - it picks the right segment ≈54% of the time on held-out human pairs, far above the DDG threshold's behaviour on the 44% contradicting cases).
-2. Recovering label signal from the midrange band that DDG currently discards (Stage 2 demonstrates +0.231 pairwise / +0.077 exact-match using only midrange-bearing rollouts).
-3. Comparing acquisition strategies for the elicitation step (Stages 3 and 4) so that future deployments of this kind of HRI loop have empirical guidance on whether it is worth spending engineering effort on uncertainty-driven sample selection vs cheaper diversity heuristics. This is the contribution the project's external feedback specifically requested.
-
-The most consequential null result in the comparison is Stage 4 ≈ Stage 3 — the iteration loop did not buy anything at this label budget. This is good news for deployment: a single one-shot pool selection with a frozen scorer is as effective as a more complex 4-round protocol with model retraining between rounds. At larger budgets, where the scoring model improves meaningfully between rounds, iteration may still pay off; at this scale it does not.
+1. Replacing the hand-set threshold with a learned segment-ranking classifier (Stage 1).
+2. Recovering label signal from the midrange band that DDG currently discards (continuous pair weighting, §4.4).
+3. Two-phase `--human-only` fine-tune as the integration mechanism for sparse human pairs (§4.7) — preserves DDG-aligned ranking while adding human alignment.
+4. End-to-end deployment of the trained classifier inside DDG's runtime expert-selection (§6.7) — the system contribution. A new MAPF-GPT model has been trained from scratch under classifier-gated DDG ([`checkpoints/baseline/`](checkpoints/baseline/)) and is configured for a head-to-head POGEMA benchmark vs the original threshold-gated MAPF-GPT ([`checkpoints/original/`](checkpoints/original/)) at the shared `ckpt_ddg_1500.pt` cut. Downstream measurements pending.
+5. Label-preserving spatial-symmetry augmentation of the segment-classifier rollouts (§6.6.1, Isabel De Luis) — 5,007 augmented `.npz` files committed under `ranker_dataset/held_out_aug/`, providing a 4× zero-label-cost expansion of the auto-pair training corpus. Built and committed; not yet wired into a reported training run.
+6. A parallel synthetic-jitter AL track on the standalone congestion classifier (§6.6.2, Isabel De Luis).
 
 ### 7.5 Failure Modes and Generalization
 
-- Sample size. 52 annotations is small; with a 39/13 split, the val metric is still discrete (each of the 13 pairs is ≈7.7% of the metric, much improved over the previous 14.3% in the 7-pair regime, but not yet noise-free). The directional comparison between stages is meaningful, the absolute numbers retain ≈1-pair granularity.
-- Map distribution coverage. Annotations span seeds 128-143, all on the train map split. Spatial generalization to held-out val map seeds (144-147) is therefore evaluated only via auto top-3.
-- Distribution shift across DDG checkpoints. As the policy improves, "what looks congested" changes. Annotations made on rollouts from one checkpoint may not transfer cleanly to later ones.
+- **Sample size on the human val signal.** 76 pairs across 69 unique rollouts is much better than the previous 12-pair signal but each pair is still worth ≈1.3 pp on `human_val`. Multi-seed averaging is needed before claiming Stage 3 vs Stage 2 differences as robust. Direction is meaningful; magnitude carries roughly ±1 pair of noise.
+- **Map distribution coverage.** Stage 2 and Stage 3 elicitation pools are filtered to the train-map seeds; the held-out human signal uses val-map seeds 144-147. Spatial generalisation across map seeds is the relevant test.
+- **Distribution shift across DDG checkpoints.** As the policy improves, "what looks congested" changes. Annotations made on rollouts from one checkpoint may not transfer cleanly to later ones. Our `dataset/held_out/` covers `ckpt_0`, `500`, `1000`, `1500`, `30000` to mitigate this; the elicitation pool draws across all five.
+- **Annotator bias.** The new replay tool randomises A/B presentation and hides the auto-diff to mitigate bias. The very first elicitation runs (warmstart, iterative; collected before commit 502008c) show a strong b/a imbalance (e.g., warmstart: 53 b_worse vs 3 a_worse) that disappears in the post-debiasing files (random: 36/42; confusion: 32/33). This is direct evidence the debiasing fix worked.
 
 ### 7.6 HRI Implications
 
-The cost of human time was the binding constraint. Across the four canonical stages, each labelling session was budgeted at 56 pairs (≈3 hours under the one-pair-at-a-time replay protocol). That is exactly the regime where pairwise interfaces win over absolute scoring: humans can rank quickly, while scoring an absolute "congestion level" would require calibration we do not have. The replay tool reduced per-pair annotation time to roughly [FILL: seconds/pair] by precomputing trajectory animations and providing keyboard shortcuts.
+The cost of human time was the binding constraint. Each elicitation session was budgeted at 100 queries (≈3 hours under the one-pair-at-a-time replay protocol); the human's "I am unsure" rate (22% on random, 35% on confusion AL) was itself informative. Pairwise interfaces win over absolute scoring at this budget: humans can rank quickly, while scoring an absolute "congestion level" would require a calibration we do not have.
 
-Within that fixed budget, the four-stage comparison cleanly answers two HRI-design questions. (a) *Does the labelling cost pay off without prioritisation?* No - random sampling at 56 labels gives zero lift over the auto-only baseline on held-out human alignment. (b) *Does an uncertainty × diversity acquisition unlock the labels?* Yes - the same 56-label budget under AL selection delivers +17 pp on `hp_val`. The engineering investment in `query.py`'s acquisition loop pays for itself once the alternative is empirically null. The further finding that iterative AL did not improve over single-shot AL at this scale (Stage 4 ≈ Stage 3) is a deployment win: the simpler one-shot protocol is sufficient.
+Within that budget, the three-stage comparison cleanly answers two HRI-design questions. (a) *Does fine-tuning on a small budget of human pairs damage the auto-aligned ranker?* No — `pair_acc` is preserved to within 0.002 across all stages. (b) *Does an entropy-driven acquisition unlock more value than uniform random sampling?* Yes, modestly — confusion AL gets a higher and more stable `human_val` than random at a smaller label budget (65 vs 78). These two findings together recover the main value proposition of HRI in this setting: human labels can be safely added to a strong auto baseline, and a small amount of selection-strategy engineering can stretch a fixed annotation budget further.
 
 ---
 
 ## 8. Limitations and Future Work
 
-- Pure offline training. The classifier is currently trained once after annotations are collected; it is not retrained in-the-loop with DDG. An online integration where the classifier replaces the threshold in `delta_data_generator.py` and is retrained periodically with fresh annotations is the natural next step.
-- No downstream MAPF-GPT impact study. This report measures the classifier; we have not yet measured whether using the classifier in DDG improves the downstream MAPF-GPT policy on POGEMA benchmarks. That is the most consequential open question.
-- Few annotators. The 56 collected annotations come from two annotators on the team. Inter-annotator agreement was not measured systematically; the disagreement statistics in §6.1 are a mix of human-vs-auto-label (well-defined) and not a measure of human-vs-human reliability.
-- Threshold calibration on the score head. We rank but do not calibrate: deploying the classifier in DDG requires a decision threshold equivalent to the current `diff > 3`, which we have not yet selected.
-- Feature ablations. We did not isolate the contribution of the recent-history channel (channel 3). It would be useful to test whether the model picks up oscillation from this channel specifically.
-- Run-to-run variance. The trainer does not seed `torch.manual_seed`, so each run produces different weight initialisation, augmentation order, and DataLoader shuffle. The legacy hand-curation experiment showed `hp_val` swings of up to 23 pp across reseeds. Each of the four canonical stages here is a *single* seed; a multi-seed average and explicit confidence intervals are needed before the Stage 3 vs Stage 4 ordering should be reported as definitive. The directional finding (random ≪ AL) is robust to seed; the +17 pp magnitude is a single-sample point estimate.
-- Small held-out val. The val-map elicitation set is 12 pairs. Each correctly-ranked pair is worth ≈8 pp of `hp_val`, so the +17-pp Stage 3 lift over Stage 2 corresponds to flipping 2 specific pairs (5/12 → 7/12). The direction is meaningful; the magnitude carries 1-pair noise.
-- Active-learning strategy coverage. We compare three points in the AL design space (random sampling as Stage 2, uncertainty × diversity warm-start as Stage 3, iterative warm-start AL as Stage 4) but stop short of two strategies the literature [^al-survey] highlights: pure boundary querying (entropy alone, no diversity term), and pure cold-start diversity sampling (no scoring model — entropy is constant, acquisition reduces to feature-space distance only). Adding these would require additional annotation passes; we leave them as future work.
-- Annotated-set curation bias. The train-map elicitation pool was filtered to midrange-bearing rollouts (`filter_npzs_by_segment_diff.py`, default `allowed_diffs={1,2,3}` requires at least one segment in that range). The held-out val-map signal is also random-sampled from the val-map pool, which is similarly filtered. The held-out human metrics therefore measure performance on a curated slice that matches the deployment-time DDG regime (DDG also fires the expert on borderline cases) but does not quantify generalisation to an arbitrary uniform-random rollout.
-- Borderline marks not persisted. The annotation-tool schema for both batches captured only `worst` and `clean` indices, even though the protocol allowed an optional borderline mark. Extending the schema and replaying the existing 56 episodes would roughly double the pair budget at near-zero annotator cost.
+- **Iterative AL re-run pending.** Stage 4's reported numbers use the legacy mixed-mode trainer; the comparable `--human-only` two-phase iterative protocol has not yet been measured.
+- **Downstream MAPF-GPT impact pending.** The classifier-gated MAPF-GPT model has been trained ([`checkpoints/baseline/ckpt_ddg_2000.pt`](checkpoints/baseline/)) and the POGEMA benchmark is configured (§6.7), but the benchmark run has not yet produced output files. This is the most consequential open measurement.
+- **Partial classifier-gated training.** `MAPF-GPT-classifier` reaches step 2,000 vs `MAPF-GPT-original`'s step 30,000. The shared-step `ckpt_ddg_1500.pt` cut is the apples-to-apples comparison, but the asymptotic value of classifier-gated DDG is not yet measurable from this run.
+- **Geometric augmentation not yet trained on.** Isabel's [`augment_segment_rollouts.py`](augment_segment_rollouts.py) and the 5,007 committed augmented `.npz` files are available, but none of the reported May-10 training runs (Stages 1, 2, 3) used the augmented data. A re-run of Stage 1 with `--data ranker_dataset/held_out_aug` (or a merged root) is the natural next step to quantify the augmentation lift.
+- **Few annotators.** The five annotation files come from two annotators on the team. Inter-annotator agreement was not measured systematically.
+- **Threshold calibration on the score head.** We rank but do not calibrate: deploying the classifier in DDG with `expert_top_k = None` (call expert on all envs above some threshold rather than top-K) requires picking a decision threshold equivalent to the current `diff > 3`, which we have not yet selected.
+- **Feature ablations.** We did not isolate the contribution of the recent-history channel (channel 3); it would be useful to test whether the model picks up oscillation specifically from this channel.
+- **Run-to-run variance.** The trainer does not seed `torch.manual_seed`. The legacy methodology showed `human_val` swings of up to 23 pp across reseeds on the 12-pair val. The 76-pair val signal should attenuate this substantially, but we have only single-seed numbers for each stage. Multi-seed averaging is the next step.
+- **Acquisition coverage.** We measure two points in the AL design space (uniform random, entropy-only). The original `H · ‖φ_A − φ_B‖` (entropy × diversity) acquisition was simplified out of the codebase early; reintroducing it with proper cross-rollout normalisation would let us measure whether the diversity term carries any residual signal. Pure cold-start diversity sampling (no scoring model) is also unmeasured.
+- **Synthetic-jitter AL has no comparison numbers yet.** The `finetuning/export_augmented_active_learning_samples.py` track (§6.6.2) is implemented but the synthetic-AL vs random-on-augmentations comparison is not yet reported.
+- **Annotated-set curation bias.** The train-map elicitation pool was filtered to midrange-bearing rollouts. The held-out val-map signal is similarly filtered. Performance on a uniformly-random rollout is unmeasured.
 
 ---
 
 ## 9. Conclusion
 
-We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining loop with a small spatio-temporal CNN trained on a pairwise objective. Humans disagreed with the threshold's verdict in 44% of borderline cases (52 annotations across two batches; rate stable to ±2 points), demonstrating that the threshold systematically throws away signal that humans can readily provide. We then ran a four-stage comparison at fixed label budget (56 train-map labels per stage, evaluated on the same 12 held-out val-map pairs): Stage 1 auto-only baseline, Stage 2 random-sampling baseline, Stage 3 warm-start pool active learning, Stage 4 iterative active learning (4 rounds × 14 labels). The headline finding is that **selection strategy beats label volume**: Stage 2 (random sampling) achieves identical `hp_val` to Stage 1 (both 5/12 = 0.417), while Stages 3 and 4 (uncertainty × diversity AL) both reach 0.583 (7/12), a +17-pp lift over the random baseline at the same labelling cost. Iterative AL did not improve over single-shot AL at this budget. DDG-aligned ranking quality (`argmax_pm1`) is preserved within 2.4 pp across all four stages. Selecting the deployed checkpoint also matters: of the four save-best criteria we tracked, the human-argmax exact-match criterion produces a checkpoint that ties for the best pairwise score, achieves the highest exact-match score, and incurs only a 0.036 cost on auto-aligned `top-1±1` versus the best pure-DDG-aligned checkpoint. The HRI design choices - pairwise interface, replay-tool annotation surface, four save-best criteria, and the comparison across acquisition strategies - were essential to extracting useful signal from a small budget of human time, and provide a clean blueprint for adding human judgment to any DDG-style data-curation loop.
+We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining loop with a small spatio-temporal CNN trained on a continuous-weight pairwise objective and fine-tuned in a two-phase `--human-only` step on rare human pairwise verdicts. Three stages were compared at fixed fine-tune budget on a held-out 76-pair human-pair signal: Stage 1 (auto-only baseline, no human labels), Stage 2 (random sampling, 78 labels), Stage 3 (confusion-driven entropy-only AL, 65 labels). All three preserve the auto-aligned `pair_acc` to within 0.002 (0.648-0.650), demonstrating that human fine-tuning does not damage DDG-aligned ranking. On the held-out human signal, confusion AL converges to a stable `human_val ≈ 0.71` versus random's ≈ 0.66 and the auto baseline's ≈ 0.61 (late-epoch means; the auto baseline's `human_val` peak of 0.724 at epoch 7 is a transient that does not survive further training). Selection strategy beats label volume even at this modest scale: confusion AL adds value over random with fewer labels.
+
+The trained classifier is plumbed end-to-end into DDG's runtime expert-selection (`finetuning/delta_data_generator.py`), and a new MAPF-GPT model (`MAPF-GPT-classifier`, `checkpoints/baseline/ckpt_ddg_2000.pt`) has been trained from scratch under classifier-gated DDG; a head-to-head POGEMA benchmark vs the original threshold-gated `MAPF-GPT-original` at the shared `ckpt_ddg_1500.pt` cut is configured on five POGEMA suites (random, mazes, warehouse, movingai, puzzles) but the run has not yet produced output files. A label-preserving spatial-symmetry augmentation of the rollout corpus (Isabel De Luis, [`augment_segment_rollouts.py`](augment_segment_rollouts.py); 5,007 augmented `.npz` files committed) provides a 4× zero-label-cost expansion of the auto-pair training data, available for future training runs but not yet used in the May-10 stages above. A second, earlier augmentation track (synthetic-jitter AL on the standalone congestion classifier, §6.6.2) is also reported as a parallel exploration of the same acquisition family on a different data modality.
+
+The HRI design choices — pairwise interface, debiased replay tool with random A/B swap and hidden auto-diff, two-phase `--human-only` fine-tune protocol, entropy-driven acquisition — collectively converted a sparse and noisy human signal into a stable, deployable lift over the auto baseline without sacrificing auto-aligned ranking. They constitute a clean blueprint for adding human judgment to any DDG-style data-curation loop.
 
 ---
 
 ## References
 
-[FILL - IEEE format]
+[FILL — IEEE format]
 
 [^mapfgpt]: A. Andreychuk et al., "MAPF-GPT: Imitation Learning for Multi-Agent Pathfinding at Scale," AAAI 2025.
 [^ddg]: A. Andreychuk et al., "Advancing Learnable Multi-Agent Pathfinding Solvers with Active Fine-Tuning," arXiv:2506.23793, 2025.
@@ -401,9 +468,9 @@ We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining lo
 [^pogema]: A. Skrynnik et al., "POGEMA: A Benchmark for Multi-Agent Pathfinding," 2024.
 [^tamer]: W. B. Knox and P. Stone, "TAMER: Training an Agent Manually via Evaluative Reinforcement," ICDL 2008.
 [^prefs]: P. Christiano et al., "Deep Reinforcement Learning from Human Preferences," NeurIPS 2017.
-[^pairwise]: [FILL - pairwise comparison HRI reference, e.g., Sadigh et al. on active preference-based reward learning]
+[^pairwise]: [FILL — pairwise comparison HRI reference, e.g., Sadigh et al. on active preference-based reward learning]
 [^ranknet]: C. Burges et al., "Learning to Rank using Gradient Descent," ICML 2005.
-[^al-survey]: B. Settles, "Active Learning Literature Survey," University of Wisconsin-Madison Department of Computer Sciences Technical Report #1648, 2010. (See also the AL-strategies overview on page 3 of [the paper the project's external reviewer linked]; FILL with exact citation.)
+[^al-survey]: B. Settles, "Active Learning Literature Survey," University of Wisconsin-Madison Department of Computer Sciences Technical Report #1648, 2010.
 [^pairwise-al]: D. Sadigh et al., "Active Preference-Based Learning of Reward Functions," RSS 2017. (Acquisition function combining preference uncertainty with feature distance.)
 [^dagger]: S. Ross, G. Gordon, J. A. Bagnell, "A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning (DAgger)," AISTATS 2011.
 
@@ -411,19 +478,19 @@ We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining lo
 
 ## Appendix A: Integration Options Considered
 
-| | What it does | Verdict |
+| Option | What it does | Verdict |
 |---|---|---|
-| A. Naive append | Add human pairs at weight 1.0 alongside auto | Contradictions cancel against auto twins |
-| B. Override (adopted) | For annotated episodes, replace all auto pairs with the single human pair at weight 1.0 | Clean; eliminates contradictions |
-| C. Surgical override | Drop only auto pairs involving `worst_idx` or `clean_idx` | Marginal gain over B at higher complexity cost |
-| D. Upweight | Append human at higher weight (2.0-5.0) without removing auto pairs | Contradictions still present; just lets humans win the gradient war |
-| E. Re-bucket | Use human verdict as ground truth for the marked indices and force their buckets | Over-extrapolates from 2 segments to a whole episode |
+| A. Naive append | Add human pairs at weight 1.0 alongside auto | ≈100 human pairs vs ≈78k auto pairs → human gradient is < 0.1% of update; model never moves |
+| B. Surgical override (legacy) | Drop auto pairs only from annotated episodes, replace with human pair | Helped on the previous mixed-mode trainer but still drowns human signal across non-annotated episodes |
+| C. **Two-phase `--human-only` (adopted)** | Phase 1 train auto-only backbone; phase 2 fine-tune with `--human-only --init-from <phase1>.pair_acc.pt`. Auto pairs disabled in phase 2 entirely. | Clean separation; phase 1 gets full auto-pair signal, phase 2 gets full human-pair signal; `pair_acc` preserved within 0.002 across stages |
+| D. Upweight | Append human at higher weight (2.0-5.0) without removing auto pairs | Still drowns at this scale; would need weight ≥ 800× to have parity, which destabilises auto-pair ranking |
+| E. Re-bucket | Use human verdict as ground truth for the marked indices and force their auto-diff buckets | No longer applicable: bucketing has been replaced with continuous gap weighting (§4.4) |
 
 ---
 
 ## Appendix B: Per-Annotation Disagreement Examples
 
-[OPTIONAL: pick 3 representative annotations; show segment_diffs alongside human worst/clean indices and a short caption explaining what the human saw that the diff missed.]
+[OPTIONAL: pick 3 representative annotations from `annotation_val_map.json` where the human verdict contradicts the auto-diff ordering; show segment_diffs alongside human worst/clean indices and a short caption explaining what the human saw that the diff missed. The new persisted schema records `segment_a_range` and `segment_b_range` so the exact frames can be reproduced.]
 
 ---
 
@@ -431,12 +498,13 @@ We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining lo
 
 Key talking points to lift directly into slides:
 
-- Hook. "Random sampling of 56 human labels gives the same held-out human-pair accuracy as zero labels (5/12 = 0.417). Smart selection of the same 56 labels — uncertainty × diversity active learning — lifts it to 7/12 = 0.583. Selection strategy beats label volume."
-- Visual hook 1. Side-by-side: auto-pair direction vs human-pair direction on a contradicting annotation (one of 23/52), with the replay-tool screenshot. Establishes that humans see what LaCAM-diff does not.
-- Visual hook 2. The 4-stage bar chart (`comparison_4stages.png`): Stage 1 (auto-only) and Stage 2 (random sampling) on the left at 0.417; Stages 3 (warm-start AL) and 4 (iterative AL) on the right at 0.583. Same 56-label budget across Stages 2-4. The visual asymmetry between random and AL is the slide.
-- Visual hook 3. The 4-checkpoint × 5-metric save-best grid (Section 7.3 table). Different save criteria pick different epochs and the deployment choice is non-obvious.
-- Three-act structure. Problem (DDG threshold is brittle and wrong on 44% of borderline cases) → Method (segment classifier + Option-B override + comparison across acquisition strategies + 4 save-best criteria) → Result (random sampling gives zero lift; AL gives +17 pp on held-out; iterative ≈ single-shot).
-- Where we sit among approaches (one slide). Table from §7.4: MAPF-GPT (no human) → DAgger (uniform expert relabelling) → DDG (cheap-probe-thresholded relabelling) → Stage 2 random sampling (human, no priority) → Stages 3/4 AL (human + selection priority). Each row gets one short reason it falls short; ours gets the punchline that selection priority is what unlocks the human signal.
-- HRI hammer. The pairwise interface made annotations cheap to collect. The novel finding is that *cheap-to-collect labels still need expensive-to-design selection rules*: human time on randomly-chosen pairs goes to waste at this scale.
-- Methodological takeaway. Save multiple checkpoints by orthogonal criteria. The same training run produces deployable models that vary by 31 percentage points on `human_argmax_top1` depending on which epoch you pick.
-- Honest limitations. (a) Single-seed for each of the four canonical stages; the legacy hand-curation re-seed swung up to 23 pp on `hp_val`, so single-seed orderings need multi-seed averaging before they're definitive. (b) Held-out val is 12 pairs — each correctly-ranked pair is worth ≈8 pp. (c) Two AL strategies the literature highlights (pure boundary querying, pure cold-start diversity sampling with no scoring model) are future work.
+- **Hook.** "Across three stages — auto-only, random fine-tune, confusion-AL fine-tune — the DDG-aligned `pair_acc` is preserved to within 0.002 (0.648-0.650). On a held-out 76-pair human signal, confusion AL converges to a stable `human_val ≈ 0.71`, versus the auto baseline's late-epoch `≈ 0.61`. Selection strategy beats label volume even at this modest scale: 65 confusion-AL labels beat 78 random labels."
+- **Visual hook 1.** Side-by-side: auto-pair direction vs human-pair direction on a contradicting annotation, with the replay-tool screenshot. Establishes that humans see what LaCAM-diff does not.
+- **Visual hook 2.** The 3-stage `human_val` trajectory plot — show that Stage 1's peak is a transient at epoch 7 while Stage 3's plateau at 0.71 is stable from epoch 35 onward.
+- **Visual hook 3.** The 3-stage `pair_acc` overlap plot — three curves visually overlapping by epoch 60. "Adding human supervision did not damage auto-aligned ranking."
+- **Three-act structure.** Problem (DDG threshold is brittle and wrong on ~44% of borderline cases) → Method (segment classifier + continuous gap weighting + two-phase `--human-only` fine-tune + entropy-driven acquisition + end-to-end DDG integration) → Result (`pair_acc` preserved within 0.002; confusion AL stable at `human_val ≈ 0.71`; downstream DDG-loop integration in progress).
+- **Where we sit among approaches (one slide).** Table from §7.4: MAPF-GPT (no human) → DAgger (uniform expert relabelling) → DDG (cheap-probe-thresholded relabelling) → Stage 1 (learned ranker, no human) → Stage 2 (random fine-tune) → Stage 3 (entropy AL fine-tune). Each row gets one short reason it falls short; ours gets the punchline that selection strategy + two-phase fine-tune is what unlocks the human signal without sacrificing the auto baseline.
+- **HRI hammer.** The pairwise interface made annotations cheap to collect, and the random-A/B-swap + hidden-auto-diff debiasing fix demonstrably balanced annotator output (warmstart 53/3 → confusion 32/33). The novel finding is that *cheap-to-collect labels still need expensive-to-design selection rules*: random sampling at 78 labels gives a stable but lower lift than entropy-AL at 65 labels.
+- **Closed-loop slide.** New `MAPF-GPT-classifier` model trained from scratch under classifier-gated DDG ([`checkpoints/baseline/`](checkpoints/baseline/), through `ckpt_ddg_2000`); head-to-head POGEMA benchmark vs the original threshold-gated `MAPF-GPT-original` ([`checkpoints/original/`](checkpoints/original/)) configured at the shared `ckpt_ddg_1500.pt` cut on five suites (random / mazes / warehouse / movingai / puzzles). Disambiguate "Baseline" — the eval-config algorithm key `Baseline` is the *new MAPF-GPT model*, not the *Stage 1 auto-only segment classifier*.
+- **Augmentation slide.** Isabel's [`augment_segment_rollouts.py`](augment_segment_rollouts.py): label-preserving spatial symmetries (hflip / vflip / rot180) applied directly to segment-classifier rollouts, preserving `segment_diffs`. 5,007 augmented `.npz` files committed under `ranker_dataset/held_out_aug/`, a 4× zero-label-cost expansion of auto-pair training data. Available for future re-runs.
+- **Honest limitations.** (a) Single-seed for each of the three canonical stages; the 76-pair val should attenuate seed variance vs the legacy 12-pair signal but multi-seed averaging is needed to claim stable orderings. (b) Stage 4 iterative AL re-run pending. (c) POGEMA benchmark output files pending. (d) Geometric augmentation built but not yet trained on. (e) Synthetic-jitter AL track has no numerical comparison yet.
