@@ -152,11 +152,16 @@ algorithms:
   #   parallel_backend: balanced_dask
   #   num_process: 4
   #   path_to_weights: checkpoints/baseline/ckpt_ddg_1500.pt
-  Random:
+  # Random:
+  #   name: MAPF-GPT
+  #   parallel_backend: balanced_dask
+  #   num_process: 4
+  #   path_to_weights: checkpoints/random/ckpt_ddg_1500.pt
+  Confusion:
     name: MAPF-GPT
     parallel_backend: balanced_dask
     num_process: 4
-    path_to_weights: checkpoints/random/ckpt_ddg_1500.pt
+    path_to_weights: checkpoints/confusion/ckpt_ddg_1500.pt
 
 results_views:
   TabularView1:
