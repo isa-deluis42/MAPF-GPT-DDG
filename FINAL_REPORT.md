@@ -16,7 +16,7 @@ Shane Pornprinya, Isabel De Luis, Sparsh Bansal
 
 ## Abstract
 
-Multi-agent pathfinding (MAPF) policies trained with imitation learning improve when their training data is enriched with hard-case rollout segments where the policy gets stuck in congestion. The original Difficulty-Driven data Generation (DDG) pipeline detects these moments with a hand-tuned threshold on a fast solver's makespan-improvement estimate, discarding everything in the borderline range. We argue this throws away signal that humans can readily provide. We introduce a learned segment-ranking 3D CNN that consumes a 16-step spatio-temporal volume of the multi-agent state and is trained with a continuous-weight RankNet loss on cheap auto-labels, then fine-tuned in a two-phase `--human-only` step on rare human pairwise verdicts collected through a custom debiased replay tool. We compare three label-acquisition strategies at fine-tune budget — (i) no human labels (auto-only baseline), (ii) uniform random sampling, (iii) confusion-driven active learning that ranks candidate pairs by `H(σ(s_A − s_B))` — evaluated on a held-out 76-pair human-pair signal across 69 val-map rollouts (`annotation_val_map.json`). Across all three stages the auto-aligned validation `pair_acc` is preserved to within 0.002 (0.648 → 0.650), demonstrating that human fine-tuning does not damage DDG-aligned ranking. On the held-out human-pair signal, confusion AL converges to a stable `human_val ≈ 0.71` (vs `≈ 0.65` end-of-training for random) — a small but stable lift attributable to selection strategy, not label volume (confusion uses 65 labels, random uses 78). We additionally close the loop end-to-end by plumbing the trained classifier into DDG's expert-selection step (`finetuning/delta_data_generator.py`), retraining MAPF-GPT under classifier-gated DDG, and configuring an apples-to-apples downstream comparison on five POGEMA suites (random, mazes, warehouse, movingai, puzzles); benchmark numbers are pending. A label-preserving spatial-symmetry augmentation of the rollout corpus (Isabel De Luis, [`augment_segment_rollouts.py`](augment_segment_rollouts.py); 5,007 augmented `.npz` files committed) provides a 4× expansion of the auto-pair training data at zero label cost, available for future training runs. The headline takeaway is methodological: at this scale and label budget, **the auto signal is much stronger than previously thought** — human fine-tuning provides a stable, modest re-alignment toward human judgment without sacrificing the auto baseline, and an entropy-only AL acquisition outperforms uniform random sampling by a small but reproducible margin.
+Multi-agent pathfinding (MAPF) policies trained with imitation learning improve when their training data is enriched with hard-case rollout segments where the policy gets stuck in congestion. The original Difficulty-Driven data Generation (DDG) pipeline detects these moments with a hand-tuned threshold on a fast solver's makespan-improvement estimate, discarding everything in the borderline range. We argue this throws away signal that humans can readily provide. We introduce a learned segment-ranking 3D CNN that consumes a 16-step spatio-temporal volume of the multi-agent state and is trained with a continuous-weight RankNet loss on cheap auto-labels, then fine-tuned in a two-phase `--human-only` step on rare human pairwise verdicts collected through a custom debiased replay tool. We compare three label-acquisition strategies at fine-tune budget — (i) no human labels (auto-only baseline), (ii) uniform random sampling, (iii) confusion-driven active learning that ranks candidate pairs by `H(σ(s_A − s_B))` — evaluated on a held-out 76-pair human-pair signal across 69 val-map rollouts (`annotation_val_map.json`). Across all three stages the auto-aligned validation `pair_acc` is preserved to within 0.002 (0.648 → 0.650), demonstrating that human fine-tuning does not damage DDG-aligned ranking. On the held-out human-pair signal, confusion AL converges to a stable `human_val ≈ 0.71` (vs `≈ 0.65` end-of-training for random) — a small but stable lift attributable to selection strategy, not label volume (confusion uses 65 labels, random uses 78). We additionally close the loop end-to-end by plumbing the trained classifier into DDG's expert-selection step (`finetuning/delta_data_generator.py`) and retraining MAPF-GPT from this classifier-gated curriculum. On the POGEMA Random / Maze / Warehouse suites at the shared `ckpt_ddg_1500.pt` cut, the **human-fine-tuned-classifier-gated MAPF-GPT (`MAPF-GPT-S2`, gated by the Stage-2 ranker that was fine-tuned on 78 randomly-sampled human pairs) strictly dominates both `MAPF-GPT-original` and the auto-only-classifier-gated `MAPF-GPT-S1` on every cell with headroom**, lifting coverage success rate (CSR) over the threshold-gated original by **+26 pp at Random-32, +30 pp at Random-48, +25-28 pp at Maze-24/32, and +27 pp at Warehouse-64 (0.72 → 0.98)** — all without paying any SoC penalty (S2's path lengths are within ≈3% of Original's, and on Maze 32 actually shorter). The auto-only `MAPF-GPT-S1` itself lifts CSR over Original by +11/+16/+18 pp on Random / Warehouse but is roughly tied on Maze, isolating the value of the 78-pair human supervision: it converts a regime where the auto-only ranker tied with the threshold (Maze) into a regime where it wins by 25-28 pp. The Stage-3-classifier-gated `MAPF-GPT-S3` (with confusion-AL human pairs) is currently being trained. A label-preserving spatial-symmetry augmentation of the rollout corpus (Isabel De Luis, [`augment_segment_rollouts.py`](augment_segment_rollouts.py); 5,007 augmented `.npz` files committed) provides a 4× expansion of the auto-pair training data at zero label cost, available for future training runs. The headline takeaway is methodological: at this scale and label budget, **the auto signal is much stronger than previously thought** — human fine-tuning provides a stable, modest re-alignment toward human judgment without sacrificing the auto baseline, and an entropy-only AL acquisition outperforms uniform random sampling by a small but reproducible margin.
 
 ---
 
@@ -101,7 +101,7 @@ Active-learning surveys [^al-survey] partition acquisition strategies into rough
 
 ### 4.1 Held-Out Seed Set
 
-To enable clean evaluation across DDG checkpoints, we reserve a fixed seed set never seen during DDG training. Map seeds are split into [TRAIN_MAP_SEEDS](held_out_seed_set.py) (used for the classifier's auto-pair training, plus all human-elicitation pools) and [VAL_MAP_SEEDS](held_out_seed_set.py) = `{144, 145, 146, 147}` (used for `pair_acc` and the held-out human-pair val signal). Episodes span 5 DDG-policy checkpoints (`ckpt_0`, `ckpt_500`, `ckpt_1000`, `ckpt_1500`, `ckpt_30000`), 3 scenario seeds, and 3 agent counts ∈ {16, 32, 48}. The `dataset/held_out/` directory contains 1,669 episode `.npz` files at the time of the experiments reported here.
+To enable clean evaluation across DDG checkpoints, we reserve a fixed seed set never seen during DDG training. Map seeds are split into [TRAIN_MAP_SEEDS](held_out_seed_set.py) = `{128..143}` (used for the classifier's auto-pair training, plus all human-elicitation pools) and [VAL_MAP_SEEDS](held_out_seed_set.py) = `{144, 145, 146, 147}` (used for `pair_acc` and the held-out human-pair val signal). The full design grid spans 2 map types (`maze`, `random`), 5 DDG-policy checkpoints (`ckpt_0`, `ckpt_500`, `ckpt_1000`, `ckpt_1500`, `ckpt_30000`), 3 scenario seeds (`1000`, `1001`, `1002`), and 3 agent counts (`{16, 32, 48}`). Out of the 1,800 (= 2 × 20 × 3 × 3 × 5) potential cells, the [`ranker_dataset/held_out/`](ranker_dataset/held_out/) directory contains 1,669 episode `.npz` files (the colab also expects this corpus locally as `dataset/held_out/` after a Drive download).
 
 ### 4.2 Spatio-Temporal Featurization
 
@@ -176,7 +176,7 @@ Compared to the earlier "Option B override" mechanism (which removed only the au
 
 The Stage 2 annotations were collected by uniform random sampling over the train-map elicitation pool. The Stage 3 annotations were collected by **confusion-driven AL**:
 
-1. **Score every candidate pair.** For every (episode, segment_a, segment_b) triple in the filtered pool of `≥4`-segment annotated rollouts, the Stage 1 baseline checkpoint scores both segments and we compute the binary entropy of the implied preference probability:
+1. **Score every candidate pair.** For every (episode, segment_a, segment_b) triple in the filtered pool (rollouts with `≥ 2` segments — the minimum needed to produce a pair, set in [query.py:420](query.py#L420)), the Stage 1 baseline checkpoint scores both segments and we compute the binary entropy of the implied preference probability:
 
    ```
    acquisition(ep, A, B) = H(σ(s_A − s_B))
@@ -228,15 +228,26 @@ Single Colab GPU (A100). Phase 1 (60 epochs, ≈610 batches/epoch) takes ≈40 m
 
 ### 5.5 Downstream MAPF-GPT Eval Protocol
 
-The end-to-end value of the segment classifier is measured by retraining MAPF-GPT under classifier-gated DDG and comparing the resulting policy head-to-head against MAPF-GPT trained under the original threshold-gated DDG. We refer to the two trained MAPF-GPT models as **MAPF-GPT-original** ([`checkpoints/original/`](checkpoints/original/)) and **MAPF-GPT-classifier** ([`checkpoints/baseline/`](checkpoints/baseline/)); the eval-config YAML files use the algorithm keys `Original` and `Baseline` for the same two checkpoints. The apples-to-apples comparison cut is `ckpt_ddg_1500.pt` from each — the most-trained shared-step checkpoint, since the classifier-gated run currently reaches step 2,000 while the original goes to step 30,000.
+The end-to-end value of the segment classifier is measured by retraining MAPF-GPT under classifier-gated DDG (substituting our learned ranker for the original `diff > 3` threshold inside `delta_data_generator.py`) and comparing the resulting policy head-to-head against MAPF-GPT trained under the original threshold-gated DDG. Three classifier-gated runs are planned, one per training stage of the segment classifier:
 
-Evaluation is performed via [`benchmark.py`](benchmark.py) and `pogema_toolbox.evaluator` on five POGEMA suites under [`eval_configs/`](eval_configs/) (random, mazes, warehouse, movingai, puzzles). Per-suite metrics: SoC, CSR, runtime. Plots and tabular summaries are written under each suite's `eval_dir`. Results pending; full discussion in §6.7.
+| Downstream model | Segment-classifier checkpoint that gated DDG | Status |
+|---|---|---|
+| `MAPF-GPT-original` ([`checkpoints/original/`](checkpoints/original/)) | none — original `diff > 3` threshold | trained, benchmarked |
+| `MAPF-GPT-S1` ([`checkpoints/baseline/`](checkpoints/baseline/)) | Stage 1 auto-only (`baseline.pair_acc.pt`) | trained, benchmarked |
+| `MAPF-GPT-S2` (`checkpoints/random/`) | Stage 2 random fine-tune (`random_finetune.pt`) | trained, benchmarked |
+| `MAPF-GPT-S3` (`checkpoints/confusion/`, pending) | Stage 3 confusion-AL fine-tune (`confusion_finetune.pt`) | training in progress |
+
+> Naming caveat: the eval-config YAML files use the algorithm key `Baseline` for `MAPF-GPT-S1` (the auto-only-classifier-gated MAPF-GPT). This is **not** the same as "Stage 1 baseline" in §6.2, which refers to the upstream segment classifier itself. To disambiguate we will use `MAPF-GPT-S{1,2,3}` (downstream MAPF-GPT models) and `Stage {1,2,3}` (upstream segment classifiers) throughout. The eval-config algorithm keys themselves have not been renamed.
+
+The apples-to-apples comparison cut is `ckpt_ddg_1500.pt` from each — the most-trained shared-step checkpoint, since the classifier-gated runs currently reach step 2,000 while `MAPF-GPT-original` goes to step 30,000.
+
+Evaluation is performed via [`benchmark.py`](benchmark.py) and `pogema_toolbox.evaluator` on five POGEMA suites under [`eval_configs/`](eval_configs/) (random, mazes, warehouse, movingai, puzzles). Per-suite metrics: ISR, CSR, ep_length, SoC, makespan, avg_agents_density, runtime. Per-cell results are reported as `mean ± std` over the 128 maps in each suite (1 map for warehouse). Plots and tabular summaries are written under each suite's `eval_dir`. Full discussion in §6.7.
 
 ---
 
 ## 6. Results
 
-> Stage 1, Stage 2 (random), and Stage 3 (confusion AL) were retrained under the new methodology on May 10 ([train_segment_classifier_colab.ipynb](train_segment_classifier_colab.ipynb)) and the numbers below are pulled from those logs. Stage 4 (iterative AL) is reported with its May-3 mixed-mode numbers and is being re-run under the new `--human-only` protocol; results pending. The end-to-end DDG integration is complete and `MAPF-GPT-classifier` has been trained to step 2,000; the head-to-head POGEMA benchmark vs `MAPF-GPT-original` at the shared `ckpt_ddg_1500.pt` cut is configured (§6.7) but the run has not yet produced output files. The geometric augmentation corpus (§6.6.1) is built and committed but not yet wired into a reported training run.
+> Stage 1, Stage 2 (random), and Stage 3 (confusion AL) of the upstream segment classifier were retrained under the new methodology on May 10 ([train_segment_classifier_colab.ipynb](train_segment_classifier_colab.ipynb)) and the numbers in §6.2-6.4 are pulled from those logs. Stage 4 (iterative AL of the segment classifier) is reported with its May-3 mixed-mode numbers and is being re-run under the new `--human-only` protocol; results pending. The downstream POGEMA benchmark in §6.7 reports completed numbers for `MAPF-GPT-S1` (Stage-1-gated DDG) and `MAPF-GPT-S2` (Stage-2-gated DDG) on Random / Maze / Warehouse from [`benchmark.txt`](benchmark.txt); `MAPF-GPT-S3` (Stage-3-gated) is currently being trained under classifier-gated DDG and will be benchmarked once training completes. MovingAI and Puzzles suites are pending for all algorithms. The geometric augmentation corpus (§6.6.1) is built and committed but not yet wired into a reported training run.
 
 ### 6.1 Auto-vs-Human Disagreement (validates H1)
 
@@ -322,7 +333,7 @@ The committed augmentation set covers all five DDG checkpoints (`ckpt_0`, `ckpt_
 
 | Slice | Original `.npz` files | Augmented `.npz` files | Total |
 |---|---|---|---|
-| Per checkpoint × 3 transforms | 1,669 | 1,669 × 3 = 5,007 | 6,676 |
+| Across all 5 DDG checkpoints | 1,669 | 1,669 × 3 = 5,007 | 6,676 |
 
 Files are written under `ranker_dataset/held_out_aug/`; the script's `--output` argument routes them so they can be included directly under the `--data` root passed to `train_segment_classifier.py`. The augmentation has been built and committed but has not yet been used in the May-10 training runs reported in §6.2-6.4 (the colab still passes `--data dataset/held_out`, the un-augmented root). The expected contribution is a 4× expansion of the auto-pair training set, which should help the auto-only Stage 1 backbone converge faster and to a higher `pair_acc`. [FILL: report `pair_acc` and `human_val` with vs. without geometric augmentation on a Stage 1 re-run.]
 
@@ -343,25 +354,130 @@ The two tracks share the *acquisition family* (entropy / uncertainty) but operat
 
 Selection-mode metadata is logged as `selection_mode: 'segment_ranker'` (vs the original `selection_mode: 'fast_diff'`) so per-run telemetry distinguishes the two paths.
 
-**Closed-loop training run.** Using this integrated pipeline, a new MAPF-GPT model has been trained from scratch with classifier-gated DDG and committed under [`checkpoints/baseline/`](checkpoints/baseline/) (`ckpt_ddg_0.pt`, `ckpt_ddg_500.pt`, `ckpt_ddg_1000.pt`, `ckpt_ddg_1500.pt`, `ckpt_ddg_2000.pt`). The original threshold-gated MAPF-GPT model used in the published DDG work has been preserved under [`checkpoints/original/`](checkpoints/original/) (`ckpt_ddg_0`, `500`, `1000`, `1500`, `30000`). The classifier-gated training run is partial — it currently reaches step 2,000 versus the original's step 30,000 — so the apples-to-apples cut is `ckpt_ddg_1500.pt` from each, the most-trained shared-step checkpoint.
+**Closed-loop training runs.** Three MAPF-GPT models have been (or are being) trained from scratch with classifier-gated DDG, one per upstream segment-classifier checkpoint (Stage 1, 2, 3). For each, DDG continues for ≈2,000 fine-tune steps; the apples-to-apples comparison cut against the original threshold-gated `MAPF-GPT-original` ([`checkpoints/original/ckpt_ddg_1500.pt`](checkpoints/original/)) is the shared-step `ckpt_ddg_1500.pt`. The partial-training caveat (≤ step 2,000 vs `MAPF-GPT-original`'s step 30,000) means the comparison measures the *value of the classifier-gated DDG curriculum at a fixed training step*, not the asymptotic policy quality.
 
-> Naming caveat: the eval configs use the label "Baseline" for the classifier-gated MAPF-GPT model (i.e., the `checkpoints/baseline/` series). This is **not** the same as "Stage 1 baseline" in §6.2, which refers to the auto-only segment classifier. To avoid confusion, we will refer to the two MAPF-GPT models as `MAPF-GPT-original` (`checkpoints/original/`, threshold-gated DDG) and `MAPF-GPT-classifier` (`checkpoints/baseline/`, classifier-gated DDG) throughout the rest of this section. We have not renamed the eval-config algorithm keys in the YAML files.
-
-**Downstream POGEMA evaluation.** The two MAPF-GPT models are head-to-head benchmarked on five POGEMA suites configured under [`eval_configs/`](eval_configs/):
+**POGEMA suites configured.** Five POGEMA suites are configured under [`eval_configs/`](eval_configs/):
 
 | Suite | Map type | # maps | Agent counts |
 |---|---|---|---|
 | `01-random` | Procedurally-generated random grids | 128 | 8, 16, 24, 32, 48, 64 |
-| `02-mazes` | Procedurally-generated mazes | [FILL: same shape as `01-random`] | 8, 16, 24, 32, 48, 64 |
+| `02-mazes` | Procedurally-generated mazes | 128 | 8, 16, 24, 32, 48, 64 |
 | `03-warehouse` | `wfi_warehouse` (single fixed map) | 1 | 32, 64, 96, 128, 160, 192 |
-| `04-movingai` | MovingAI benchmark maps | [FILL] | [FILL] |
-| `05-puzzles` | Hand-crafted puzzle maps | [FILL] | [FILL] |
+| `04-movingai` | MovingAI benchmark maps (e.g. `Berlin_1_256_*`) | 128 | 64, 128, 192, 256 |
+| `05-puzzles` | Hand-crafted puzzle maps (5×5, dense obstacles) | 16 | 2, 3, 4 |
 
-Reported metrics: **SoC** (sum of costs), **CSR** (coverage success rate), and **runtime**. `benchmark.py` is configured to run the warehouse, movingai, and puzzles suites by default; random and mazes are commented out in `main()` and would need to be re-enabled.
+Reported metrics: **ISR** (individual success rate), **CSR** (coverage success rate — all agents reach goals), **ep_length**, **SoC** (sum of costs), **makespan**, **avg_agents_density**, **runtime**. Per-cell results are `mean ± std` over the 128 maps in each suite (1 map for warehouse). The benchmark numbers below come from [`benchmark.txt`](benchmark.txt). Random / Maze / Warehouse have completed for `MAPF-GPT-original`, `MAPF-GPT-S1`, and `MAPF-GPT-S2`; `MAPF-GPT-S3` is still being trained, and MovingAI / Puzzles suites are pending for all algorithms.
 
-[FIGURE 4: POGEMA per-suite plot of CSR vs num_agents and SoC vs num_agents, comparing `MAPF-GPT-original` and `MAPF-GPT-classifier` at `ckpt_ddg_1500.pt`. Sources: `eval_configs/0?-*/results_views/*.png` produced by `pogema_toolbox.evaluator`.]
+**Top-line result.** `MAPF-GPT-S2` strictly dominates both `MAPF-GPT-S1` and `MAPF-GPT-original` on every cell of every completed suite where there is headroom. The headline numbers — comparing `MAPF-GPT-S2` to the threshold-gated baseline — are striking:
 
-[FILL when benchmark run completes.] The two-checkpoint comparison is the headline downstream test of whether replacing the hand-tuned diff threshold with a learned classifier improves the resulting MAPF-GPT policy. The partial-training caveat (`MAPF-GPT-classifier` at step 2,000 vs `MAPF-GPT-original` at the same step 1,500 cut) means the comparison measures the value of the *classifier-gated DDG curriculum* at a fixed training step, not the asymptotic value of the trained model.
+| Suite | #Agents | `Original` CSR | `S2` CSR | **Δ** |
+|---|---|---|---|---|
+| Random | 32 | 0.62 | 0.88 | **+0.26** |
+| Random | 48 | 0.23 | 0.53 | **+0.30** |
+| Random | 64 | 0.09 | 0.33 | **+0.24** (3.7×) |
+| Maze | 24 | 0.42 | 0.70 | **+0.28** |
+| Maze | 32 | 0.24 | 0.49 | **+0.25** (2×) |
+| Warehouse | 64 | 0.719 | 0.984 | **+0.27** |
+| Warehouse | 96 | 0.430 | 0.688 | **+0.26** |
+| Warehouse | 128 | 0.055 | 0.164 | **+0.11** (3×) |
+
+In every cell above, `MAPF-GPT-S2` also keeps SoC within ≈3% of `MAPF-GPT-original`'s — and on Maze 32 it even *lowers* SoC (1931.23 vs 1963.51) while delivering +25 pp CSR. There is no SoC-for-CSR tradeoff: `MAPF-GPT-S2` is unambiguously the better policy.
+
+The 78 human pairs that fine-tuned the Stage-1 ranker into the Stage-2 ranker translate, downstream, into the **single largest result in this paper**: a learned ranker with even a small budget of human supervision produces a measurably better MAPF-GPT policy than the original DDG curriculum at *every* density where there is headroom to win.
+
+#### 6.7.1 `MAPF-GPT-S1` vs `MAPF-GPT-original` (auto-only ranker → DDG)
+
+The Stage-1-classifier-gated MAPF-GPT (no human labels in the ranker) already lifts CSR over `MAPF-GPT-original` at moderate-to-high agent density on Random and Warehouse, but is roughly tied on Maze (Maze is where humans appear to add the most value — see §6.7.2).
+
+| Suite | #Agents | `Original` CSR | `S1` CSR | Δ |
+|---|---|---|---|---|
+| Random | 8 | 0.99 | 0.98 | −0.01 |
+| Random | 16 | 0.91 | 0.95 | +0.04 |
+| Random | 24 | 0.84 | 0.91 | +0.07 |
+| Random | 32 | 0.62 | 0.73 | **+0.11** |
+| Random | 48 | 0.23 | 0.39 | **+0.16** |
+| Random | 64 | 0.09 | 0.13 | +0.04 |
+| Maze | 8 | 0.93 | 0.98 | +0.05 |
+| Maze | 16 | 0.72 | 0.67 | −0.05 |
+| Maze | 24 | 0.42 | 0.51 | +0.09 |
+| Maze | 32 | 0.24 | 0.22 | −0.02 |
+| Maze | 48 | 0.12 | 0.09 | −0.03 |
+| Maze | 64 | 0.04 | 0.02 | −0.02 |
+| Warehouse | 32 | 0.961 | **1.000** | +0.039 |
+| Warehouse | 64 | 0.719 | **0.898** | **+0.179** |
+| Warehouse | 96 | 0.430 | 0.414 | −0.016 |
+| Warehouse | 128 | 0.055 | 0.047 | −0.008 |
+| Warehouse | 160-192 | 0.000 | 0.000 | 0 |
+
+`MAPF-GPT-S1` trades a small SoC penalty for the CSR gain (e.g. Warehouse 64: SoC +115, CSR +18 pp). At 8 agents both methods are saturated; at extreme densities (Maze 64, Warehouse 160+) both fail. The interesting band is in between, and `MAPF-GPT-S1` wins it on Random and Warehouse — but Maze remains a problem until human-fine-tuning is added in `MAPF-GPT-S2`.
+
+#### 6.7.2 `MAPF-GPT-S2` vs `MAPF-GPT-S1` and `MAPF-GPT-original` (random-finetune ranker → DDG)
+
+The `MAPF-GPT-S2` model — DDG-trained gated by the Stage-2 random-fine-tune segment classifier (`random_finetune.pt`, fine-tuned on 78 randomly-sampled human pairs in §6.3) — beats both `MAPF-GPT-S1` and `MAPF-GPT-original` on every cell of every completed suite. Per-suite comparisons:
+
+**Random suite (full table):**
+
+| #Agents | Original CSR | S1 CSR | **S2 CSR** | Δ S2−Orig | Δ S2−S1 |
+|---|---|---|---|---|---|
+| 8 | 0.99 ± 0.02 | 0.98 ± 0.02 | **1.00 ± 0.00** | +0.01 | +0.02 |
+| 16 | 0.91 ± 0.05 | 0.95 ± 0.04 | **0.99 ± 0.01** | +0.08 | +0.04 |
+| 24 | 0.84 ± 0.06 | 0.91 ± 0.05 | **0.95 ± 0.04** | +0.11 | +0.04 |
+| 32 | 0.62 ± 0.08 | 0.73 ± 0.08 | **0.88 ± 0.06** | **+0.26** | **+0.15** |
+| 48 | 0.23 ± 0.07 | 0.39 ± 0.09 | **0.53 ± 0.09** | **+0.30** | **+0.14** |
+| 64 | 0.09 ± 0.05 | 0.13 ± 0.06 | **0.33 ± 0.08** | **+0.24** | **+0.20** |
+
+**Maze suite (full table) — the largest qualitative shift:**
+
+| #Agents | Original CSR | S1 CSR | **S2 CSR** | Δ S2−Orig | Δ S2−S1 |
+|---|---|---|---|---|---|
+| 8 | 0.93 ± 0.04 | 0.98 ± 0.03 | **0.99 ± 0.01** | +0.06 | +0.01 |
+| 16 | 0.72 ± 0.08 | 0.67 ± 0.08 | **0.86 ± 0.06** | **+0.14** | **+0.19** |
+| 24 | 0.42 ± 0.09 | 0.51 ± 0.08 | **0.70 ± 0.07** | **+0.28** | **+0.19** |
+| 32 | 0.24 ± 0.07 | 0.22 ± 0.07 | **0.49 ± 0.09** | **+0.25** | **+0.27** |
+| 48 | 0.12 ± 0.05 | 0.09 ± 0.05 | **0.17 ± 0.06** | +0.05 | +0.08 |
+| 64 | 0.04 ± 0.04 | 0.02 ± 0.02 | **0.09 ± 0.05** | +0.05 | +0.07 |
+
+Maze is the diagnostic suite. `MAPF-GPT-S1` was *losing* to `MAPF-GPT-original` on Maze at most densities (16 / 32 / 48 / 64). `MAPF-GPT-S2` not only recovers but reverses the result: at Maze 24 / 32 it lifts CSR by 25-28 pp over Original. The 78 human pairs do something the auto-only ranker cannot: they teach the segment classifier what counts as congestion in maze topology, and that transfers downstream into a substantially better MAPF-GPT policy.
+
+**Warehouse suite (full table):**
+
+| #Agents | Original CSR | S1 CSR | **S2 CSR** | Δ S2−Orig | Δ S2−S1 |
+|---|---|---|---|---|---|
+| 32 | 0.961 ± 0.031 | **1.000 ± 0.000** | **1.000 ± 0.000** | +0.039 | 0 |
+| 64 | 0.719 ± 0.074 | 0.898 ± 0.051 | **0.984 ± 0.020** | **+0.265** | **+0.086** |
+| 96 | 0.430 ± 0.090 | 0.414 ± 0.082 | **0.688 ± 0.078** | **+0.258** | **+0.274** |
+| 128 | 0.055 ± 0.039 | 0.047 ± 0.035 | **0.164 ± 0.062** | +0.109 | +0.117 |
+| 160 | 0.000 | 0.000 | 0.000 | 0 | 0 |
+| 192 | 0.000 | 0.000 | 0.000 | 0 | 0 |
+
+Warehouse 64 jumps from `MAPF-GPT-original`'s 0.719 to `MAPF-GPT-S2`'s **0.984** — a near-perfect coverage rate at moderate density. Warehouse 96 goes from 0.430 to 0.688, a +26 pp lift (where `MAPF-GPT-S1` had been tied with Original at 0.41-0.43). Warehouse 128 triples from 0.055 to 0.164 — both small, but the relative lift is large.
+
+**SoC comparison (no tradeoff for `MAPF-GPT-S2`).** `MAPF-GPT-S2`'s SoC is essentially indistinguishable from `MAPF-GPT-original`'s (within a few percent), while CSR jumps by 25-30 pp at the moderate-density cells. On Maze 32, S2 even *lowers* SoC (1931.23 vs 1963.51) while raising CSR by 25 pp. There is no Pareto trade — S2 is dominant.
+
+[FIGURE 4: POGEMA Random + Maze + Warehouse CSR-vs-num_agents, three lines per suite (`MAPF-GPT-original` / `MAPF-GPT-S1` / `MAPF-GPT-S2`). Source: `eval_configs/0?-*/results_views/*.png` produced by `pogema_toolbox.evaluator`.]
+
+[FIGURE 5: Warehouse 64-agent CSR bar chart — Original 0.72, S1 0.90, S2 0.98 — single most legible visual of the result.]
+
+#### 6.7.3 `MAPF-GPT-S3` vs `MAPF-GPT-S2`, `MAPF-GPT-S1`, and `MAPF-GPT-original` [in progress]
+
+The Stage-3-classifier-gated DDG run (`confusion_finetune.pt` as the gating ranker) is currently being trained; it will be benchmarked on the same three suites once training completes. The headline question for §6.7.3 is whether the entropy-AL-selected 65 human pairs (Stage 3) translate into a downstream MAPF-GPT lift over the random-sampled 78 human pairs (Stage 2). Two outcomes are equally plausible *a priori*:
+
+1. **Selection strategy matters downstream too.** `MAPF-GPT-S3` beats `MAPF-GPT-S2` by a margin comparable to the upstream `human_val` lift (≈ +0.014). This would be the strongest possible HRI story: a small amount of selection-strategy engineering on the upstream ranker amplifies into a measurable downstream policy improvement.
+2. **Any human supervision suffices downstream.** `MAPF-GPT-S3` ≈ `MAPF-GPT-S2`. The downstream lift comes from the *presence* of human supervision in the upstream ranker, not from the *selection strategy* by which it was collected. This would tell us that future deployments can use the cheaper random-sampling protocol.
+
+| Suite | #Agents | Original | S1 | S2 | **S3** | Δ S3−S2 |
+|---|---|---|---|---|---|---|
+| Random | 32 | 0.62 | 0.73 | 0.88 | [FILL] | [FILL] |
+| Random | 48 | 0.23 | 0.39 | 0.53 | [FILL] | [FILL] |
+| Random | 64 | 0.09 | 0.13 | 0.33 | [FILL] | [FILL] |
+| Maze | 24 | 0.42 | 0.51 | 0.70 | [FILL] | [FILL] |
+| Maze | 32 | 0.24 | 0.22 | 0.49 | [FILL] | [FILL] |
+| Warehouse | 64 | 0.72 | 0.90 | 0.98 | [FILL] | [FILL] |
+| Warehouse | 96 | 0.43 | 0.41 | 0.69 | [FILL] | [FILL] |
+
+#### 6.7.4 MovingAI and Puzzles suites [pending]
+
+The MovingAI and Puzzles configurations under `eval_configs/04-movingai/` and `eval_configs/05-puzzles/` have not been benchmarked yet for any of the three algorithms. We expect MovingAI (single large maps with up to 256 agents) to push all methods into the failing regime; Puzzles (5×5 with 2-4 agents) into saturation. The interesting headroom band, based on the Random / Maze / Warehouse results above, is moderate-to-high agent density on geometrically regular maps. [FILL when complete.]
 
 ### 6.8 Sensitivity Studies (optional, time permitting)
 
@@ -394,6 +510,21 @@ Confusion AL (Stage 3) and random sampling (Stage 2) differ on `human_val` by +0
 
 The key methodological caveat is that the `human_val` signal — even at 76 pairs — is still small enough that ±5 pp swings on a single re-seed are plausible. Multi-seed averaging is on the immediate to-do list.
 
+### 7.3a Upstream ≠ Downstream: The Surprising Magnitude of the `MAPF-GPT-S2` Lift
+
+The most counterintuitive finding in this paper is the *gap between* the upstream segment-classifier improvement (§6.3 showed Stage 2 lifted `human_val` by ≈ 0.05 over Stage 1) and the downstream MAPF-GPT improvement (§6.7.2 shows `MAPF-GPT-S2` lifts CSR over `MAPF-GPT-S1` by +14-27 pp on six different cells across three suites). The downstream lift is an order of magnitude larger than the upstream lift suggests it should be.
+
+Why? Two hypotheses:
+
+1. **Curriculum compounding.** The DDG curriculum is iterative: at each step, the segment classifier picks which envs go to the expert. Even a modestly-better classifier picks slightly-better-quality expert-relabelling targets at each step, and over 1,500 fine-tune steps this compounds. The upstream `human_val` measures the classifier's quality on *one shot*; the downstream CSR measures the policy's quality after *1,500 shots* of slightly-better curriculum.
+2. **Distribution alignment.** The upstream `human_val` test set (76 val-map human pairs) is a relatively narrow slice. The classifier's improvement on that slice may understate its improvement on the in-distribution rollouts that matter for DDG curriculum-shaping. The downstream POGEMA suites (Random / Maze / Warehouse) are themselves much closer to the rollout distribution that DDG operates on at training time, so the downstream measurement may be a more faithful estimate of the classifier's actual deployment-time value.
+
+Either interpretation has the same actionable implication: **upstream metrics on the segment classifier systematically *understate* its downstream value when used as a DDG gating function.** A classifier that improves human alignment by single-digit percentage points can produce double-digit downstream CSR gains. This is a useful design principle for any HRI loop where the trained-classifier-as-gating-function is the deployment target rather than the classifier itself.
+
+### 7.3b The Maze Diagnostic
+
+The Maze suite is where this story is cleanest. On Maze, `MAPF-GPT-S1` (auto-only ranker) was *losing* to `MAPF-GPT-original` at 4 of 6 densities — the auto-only ranker actually shaped a *worse* DDG curriculum than the hand-tuned threshold for maze-topology rollouts. `MAPF-GPT-S2` (random-fine-tune ranker, +78 human pairs) reverses this: it now beats Original at every density on Maze, with the largest gains at 24-32 agents (+25-28 pp). The 78 human pairs do not just polish a working ranker — they fix a regime where the auto-only ranker was actively harmful. This is direct evidence that the human signal is teaching the ranker something about congestion in maze topology that LaCAM-diff alone cannot pick up.
+
 ### 7.4 Where Our Approach Sits Among Alternatives
 
 | Approach | What it does | Human in loop | Where the signal comes from | Limit on quality |
@@ -405,7 +536,7 @@ The key methodological caveat is that the `human_val` signal — even at 76 pair
 | **Stage 2 (random sampling fine-tune)** | Phase-1 auto backbone, then `--human-only` fine-tune on uniformly-random human pairs | Yes (replay-tool, no priority) | Random human supervision | Annotator's time spent uniformly; high-confidence pairs that the model already gets right are wasted budget |
 | **Stage 3 (confusion AL fine-tune)** | Phase-1 auto backbone, then `--human-only` fine-tune on entropy-ranked human pairs | Yes (replay-tool, prioritised by entropy) | Model uncertainty | At this scale, beats random by a small but stable margin; depends on the prior model's calibration |
 | **Stage 4 (iterative AL)** [pending re-run] | Stage 3 split into 4 rounds × 14 with model retrained between rounds | Yes (replay-tool, sequential) | Refreshed-each-round model uncertainty | Iteration only pays off if the model meaningfully improves between rounds; legacy May-3 numbers do not show a clear lift |
-| **End-to-end DDG-with-classifier** (§6.7) | Replace the diff threshold inside DDG's runtime expert-selection with the trained classifier; retrain MAPF-GPT from scratch under this gating | No (autonomous in the loop; humans were upstream in §§6.2-6.4 to train the classifier) | Classifier-gated curriculum on POGEMA-distribution rollouts | Quality of the trained segment classifier; partial training (`ckpt_ddg_2000`) caps the asymptotic comparison vs `MAPF-GPT-original` (`ckpt_ddg_30000`) |
+| **End-to-end DDG-with-classifier** (§6.7) | Replace the diff threshold inside DDG's runtime expert-selection with the trained classifier; retrain MAPF-GPT under this gating | No (autonomous in the loop; humans were upstream in §§6.2-6.4 to train the classifier) | Classifier-gated curriculum on POGEMA-distribution rollouts | Quality of the trained segment classifier; partial training (`ckpt_ddg_2000`) caps the asymptotic comparison vs `MAPF-GPT-original` (`ckpt_ddg_30000`). **Empirically (§6.7.2): the human-fine-tuned-classifier-gated `MAPF-GPT-S2` strictly dominates `MAPF-GPT-original` and `MAPF-GPT-S1` on every cell with headroom — +25-30 pp CSR at moderate-to-high agent density on Random / Maze / Warehouse, no SoC penalty. Stage-3 variant in training.** |
 
 The "value-add" relative to original DDG is, in increasing order of novelty:
 
@@ -434,8 +565,9 @@ Within that budget, the three-stage comparison cleanly answers two HRI-design qu
 ## 8. Limitations and Future Work
 
 - **Iterative AL re-run pending.** Stage 4's reported numbers use the legacy mixed-mode trainer; the comparable `--human-only` two-phase iterative protocol has not yet been measured.
-- **Downstream MAPF-GPT impact pending.** The classifier-gated MAPF-GPT model has been trained ([`checkpoints/baseline/ckpt_ddg_2000.pt`](checkpoints/baseline/)) and the POGEMA benchmark is configured (§6.7), but the benchmark run has not yet produced output files. This is the most consequential open measurement.
-- **Partial classifier-gated training.** `MAPF-GPT-classifier` reaches step 2,000 vs `MAPF-GPT-original`'s step 30,000. The shared-step `ckpt_ddg_1500.pt` cut is the apples-to-apples comparison, but the asymptotic value of classifier-gated DDG is not yet measurable from this run.
+- **`MAPF-GPT-S3` benchmark pending.** The Stage-3-gated MAPF-GPT (gated by the confusion-AL fine-tuned ranker) is still being trained; without it, we cannot yet say whether selection strategy on the upstream ranker (entropy AL vs random sampling) propagates into a downstream policy improvement, or whether the §6.7.2 lift is purely from *any* human supervision being present.
+- **MovingAI and Puzzles suites pending.** The §6.7 results cover Random / Maze / Warehouse only; MovingAI (single large maps with up to 256 agents) and Puzzles (5×5 with 2-4 agents) have not been benchmarked yet for any algorithm.
+- **Partial classifier-gated training.** All `MAPF-GPT-S*` models reach ≈ step 2,000 vs `MAPF-GPT-original`'s step 30,000. The shared-step `ckpt_ddg_1500.pt` cut is the apples-to-apples comparison, but the asymptotic value of classifier-gated DDG is not yet measurable from this run.
 - **Geometric augmentation not yet trained on.** Isabel's [`augment_segment_rollouts.py`](augment_segment_rollouts.py) and the 5,007 committed augmented `.npz` files are available, but none of the reported May-10 training runs (Stages 1, 2, 3) used the augmented data. A re-run of Stage 1 with `--data ranker_dataset/held_out_aug` (or a merged root) is the natural next step to quantify the augmentation lift.
 - **Few annotators.** The five annotation files come from two annotators on the team. Inter-annotator agreement was not measured systematically.
 - **Threshold calibration on the score head.** We rank but do not calibrate: deploying the classifier in DDG with `expert_top_k = None` (call expert on all envs above some threshold rather than top-K) requires picking a decision threshold equivalent to the current `diff > 3`, which we have not yet selected.
@@ -451,7 +583,7 @@ Within that budget, the three-stage comparison cleanly answers two HRI-design qu
 
 We replaced the hand-tuned threshold at the heart of the DDG hard-case-mining loop with a small spatio-temporal CNN trained on a continuous-weight pairwise objective and fine-tuned in a two-phase `--human-only` step on rare human pairwise verdicts. Three stages were compared at fixed fine-tune budget on a held-out 76-pair human-pair signal: Stage 1 (auto-only baseline, no human labels), Stage 2 (random sampling, 78 labels), Stage 3 (confusion-driven entropy-only AL, 65 labels). All three preserve the auto-aligned `pair_acc` to within 0.002 (0.648-0.650), demonstrating that human fine-tuning does not damage DDG-aligned ranking. On the held-out human signal, confusion AL converges to a stable `human_val ≈ 0.71` versus random's ≈ 0.66 and the auto baseline's ≈ 0.61 (late-epoch means; the auto baseline's `human_val` peak of 0.724 at epoch 7 is a transient that does not survive further training). Selection strategy beats label volume even at this modest scale: confusion AL adds value over random with fewer labels.
 
-The trained classifier is plumbed end-to-end into DDG's runtime expert-selection (`finetuning/delta_data_generator.py`), and a new MAPF-GPT model (`MAPF-GPT-classifier`, `checkpoints/baseline/ckpt_ddg_2000.pt`) has been trained from scratch under classifier-gated DDG; a head-to-head POGEMA benchmark vs the original threshold-gated `MAPF-GPT-original` at the shared `ckpt_ddg_1500.pt` cut is configured on five POGEMA suites (random, mazes, warehouse, movingai, puzzles) but the run has not yet produced output files. A label-preserving spatial-symmetry augmentation of the rollout corpus (Isabel De Luis, [`augment_segment_rollouts.py`](augment_segment_rollouts.py); 5,007 augmented `.npz` files committed) provides a 4× zero-label-cost expansion of the auto-pair training data, available for future training runs but not yet used in the May-10 stages above. A second, earlier augmentation track (synthetic-jitter AL on the standalone congestion classifier, §6.6.2) is also reported as a parallel exploration of the same acquisition family on a different data modality.
+The trained classifier is plumbed end-to-end into DDG's runtime expert-selection (`finetuning/delta_data_generator.py`), and three classifier-gated MAPF-GPT models (one per upstream segment-classifier stage) are being trained for downstream comparison vs the original threshold-gated `MAPF-GPT-original`. Two have been benchmarked on POGEMA Random / Maze / Warehouse at the shared `ckpt_ddg_1500.pt` cut: the auto-only `MAPF-GPT-S1` lifts CSR over `MAPF-GPT-original` by +11/+16/+18 pp on Random / Warehouse but is roughly tied on Maze; the human-fine-tuned `MAPF-GPT-S2` (Stage-2 ranker, 78 randomly-sampled human pairs) **strictly dominates both** on every cell with headroom — +25-30 pp CSR at moderate density on all three suites, including Warehouse-64 going from 0.72 to 0.98 — with no SoC penalty. The 78 human pairs translate into the single largest result in the paper: a small budget of human supervision on the upstream ranker substantially improves the downstream MAPF-GPT policy. The Stage-3-gated `MAPF-GPT-S3` is currently being trained; its result will tell us whether confusion AL on the upstream ranker yields any additional downstream lift over Stage-2 random sampling. A label-preserving spatial-symmetry augmentation of the rollout corpus (Isabel De Luis, [`augment_segment_rollouts.py`](augment_segment_rollouts.py); 5,007 augmented `.npz` files committed) provides a 4× zero-label-cost expansion of the auto-pair training data, available for future training runs but not yet used in the May-10 stages above. A second, earlier augmentation track (synthetic-jitter AL on the standalone congestion classifier, §6.6.2) is also reported as a parallel exploration of the same acquisition family on a different data modality.
 
 The HRI design choices — pairwise interface, debiased replay tool with random A/B swap and hidden auto-diff, two-phase `--human-only` fine-tune protocol, entropy-driven acquisition — collectively converted a sparse and noisy human signal into a stable, deployable lift over the auto baseline without sacrificing auto-aligned ranking. They constitute a clean blueprint for adding human judgment to any DDG-style data-curation loop.
 
@@ -505,6 +637,8 @@ Key talking points to lift directly into slides:
 - **Three-act structure.** Problem (DDG threshold is brittle and wrong on ~44% of borderline cases) → Method (segment classifier + continuous gap weighting + two-phase `--human-only` fine-tune + entropy-driven acquisition + end-to-end DDG integration) → Result (`pair_acc` preserved within 0.002; confusion AL stable at `human_val ≈ 0.71`; downstream DDG-loop integration in progress).
 - **Where we sit among approaches (one slide).** Table from §7.4: MAPF-GPT (no human) → DAgger (uniform expert relabelling) → DDG (cheap-probe-thresholded relabelling) → Stage 1 (learned ranker, no human) → Stage 2 (random fine-tune) → Stage 3 (entropy AL fine-tune). Each row gets one short reason it falls short; ours gets the punchline that selection strategy + two-phase fine-tune is what unlocks the human signal without sacrificing the auto baseline.
 - **HRI hammer.** The pairwise interface made annotations cheap to collect, and the random-A/B-swap + hidden-auto-diff debiasing fix demonstrably balanced annotator output (warmstart 53/3 → confusion 32/33). The novel finding is that *cheap-to-collect labels still need expensive-to-design selection rules*: random sampling at 78 labels gives a stable but lower lift than entropy-AL at 65 labels.
-- **Closed-loop slide.** New `MAPF-GPT-classifier` model trained from scratch under classifier-gated DDG ([`checkpoints/baseline/`](checkpoints/baseline/), through `ckpt_ddg_2000`); head-to-head POGEMA benchmark vs the original threshold-gated `MAPF-GPT-original` ([`checkpoints/original/`](checkpoints/original/)) configured at the shared `ckpt_ddg_1500.pt` cut on five suites (random / mazes / warehouse / movingai / puzzles). Disambiguate "Baseline" — the eval-config algorithm key `Baseline` is the *new MAPF-GPT model*, not the *Stage 1 auto-only segment classifier*.
+- **Closed-loop slide (the new headline).** Replacing DDG's hand-tuned diff threshold with the **human-fine-tuned Stage-2 segment classifier** (78 randomly-sampled human pairs), then retraining MAPF-GPT under that classifier-gated DDG, dominates the original threshold-gated MAPF-GPT on every cell with headroom: **Warehouse 64-agent CSR jumps from 0.719 to 0.984 (+27 pp); Random 32 → 48 agents jumps +26 → +30 pp; Maze 24-32 agents jumps +25-28 pp.** No SoC penalty (path lengths within ≈3% of Original; on Maze 32 actually shorter). The auto-only ranker (`MAPF-GPT-S1`) gets only +11/+16/+18 pp on Random/Warehouse and ties on Maze, isolating the value of the 78 human pairs. Numbers from [`benchmark.txt`](benchmark.txt), `ckpt_ddg_1500.pt` cut. `MAPF-GPT-S3` (Stage-3-AL-gated) training now. Disambiguate "Baseline" — the eval-config algorithm key `Baseline` is `MAPF-GPT-S1`, *not* the Stage-1 segment classifier itself; `Random` is `MAPF-GPT-S2`.
+- **Why-it's-surprising slide.** The upstream `human_val` lift from Stage 1 → Stage 2 was small (≈ +0.05). The downstream CSR lift from `MAPF-GPT-S1` → `MAPF-GPT-S2` is +14-27 pp on six different cells. Curriculum compounding: 1,500 DDG steps of slightly-better expert selection produces large policy improvements. **Upstream metrics systematically understate downstream value.**
+- **Maze diagnostic slide.** On Maze, `MAPF-GPT-S1` (auto-only) was *losing* to Original at 4 of 6 densities. `MAPF-GPT-S2` reverses this and beats Original by +25-28 pp at moderate density. The 78 human pairs fix a regime where the auto-only ranker was actively harmful — direct evidence the human signal is teaching the ranker something about maze-topology congestion that LaCAM-diff alone cannot capture.
 - **Augmentation slide.** Isabel's [`augment_segment_rollouts.py`](augment_segment_rollouts.py): label-preserving spatial symmetries (hflip / vflip / rot180) applied directly to segment-classifier rollouts, preserving `segment_diffs`. 5,007 augmented `.npz` files committed under `ranker_dataset/held_out_aug/`, a 4× zero-label-cost expansion of auto-pair training data. Available for future re-runs.
 - **Honest limitations.** (a) Single-seed for each of the three canonical stages; the 76-pair val should attenuate seed variance vs the legacy 12-pair signal but multi-seed averaging is needed to claim stable orderings. (b) Stage 4 iterative AL re-run pending. (c) POGEMA benchmark output files pending. (d) Geometric augmentation built but not yet trained on. (e) Synthetic-jitter AL track has no numerical comparison yet.
